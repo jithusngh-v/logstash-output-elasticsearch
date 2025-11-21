@@ -450,6 +450,9 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
 
   # Convert the event into a 3-tuple of action, params and event hash
   def event_action_tuple(event)
+    # Ensure dynamic ILM alias exists before creating the tuple
+    ensure_dynamic_ilm_alias(event) if ilm_in_use? && ilm_has_sprintf?
+    
     params = common_event_params(event)
     params[:_type] = get_event_type(event) if use_event_type?(nil)
 

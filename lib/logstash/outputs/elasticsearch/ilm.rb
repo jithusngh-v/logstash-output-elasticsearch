@@ -54,6 +54,68 @@ module LogStash; module Outputs; class ElasticSearch
       resolved
     end
 
+    # Ensure dynamic ILM rollover alias exists for a specific event
+    # This is called when using sprintf patterns in ilm_rollover_alias
+    def ensure_dynamic_ilm_alias(event)
+      return unless ilm_in_use? && ilm_has_sprintf?
+      
+      resolved_alias = resolve_ilm_rollover_alias(event)
+      resolved_policy = resolve_ilm_policy(event) if @ilm_policy
+      
+      # Thread-safe check and create
+      @dynamic_ilm_aliases_lock ||= Mutex.new
+      @dynamic_ilm_aliases_created ||= Set.new
+      
+      alias_key = "#{resolved_alias}:#{resolved_policy}"
+      
+      return if @dynamic_ilm_aliases_created.include?(alias_key)
+      
+      @dynamic_ilm_aliases_lock.synchronize do
+        # Double-check inside the lock
+        return if @dynamic_ilm_aliases_created.include?(alias_key)
+        
+        # Check if policy exists (for custom policies)
+        if resolved_policy && resolved_policy != DEFAULT_POLICY
+          unless client.ilm_policy_exists?(resolved_policy)
+            raise LogStash::ConfigurationError, 
+                  "ILM policy '#{resolved_policy}' does not exist. Please create it first using: PUT _ilm/policy/#{resolved_policy}"
+          end
+        end
+        
+        # Create the rollover alias if it doesn't exist
+        unless client.rollover_alias_exists?(resolved_alias)
+          target = "<#{resolved_alias}-#{ilm_pattern}>"
+          payload = {
+            'aliases' => {
+              resolved_alias => {
+                'is_write_index' => true
+              }
+            },
+            'settings' => {
+              'index.lifecycle.name' => resolved_policy || DEFAULT_POLICY,
+              'index.lifecycle.rollover_alias' => resolved_alias
+            }
+          }
+          
+          logger.info("Creating dynamic ILM rollover alias", 
+                     :alias => resolved_alias, 
+                     :policy => resolved_policy || DEFAULT_POLICY,
+                     :target => target)
+          
+          client.rollover_alias_put(target, payload)
+        end
+        
+        @dynamic_ilm_aliases_created.add(alias_key)
+      end
+    rescue => e
+      logger.error("Failed to create dynamic ILM alias", 
+                  :alias => resolved_alias, 
+                  :policy => resolved_policy,
+                  :error => e.message,
+                  :backtrace => e.backtrace.first(5))
+      raise
+    end
+
     def ilm_in_use?
       return @ilm_actually_enabled if defined?(@ilm_actually_enabled)
       @ilm_actually_enabled =
