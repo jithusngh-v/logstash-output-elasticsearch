@@ -4,10 +4,30 @@ module LogStash; module Outputs; class ElasticSearch
     ILM_POLICY_PATH = "default-ilm-policy.json"
 
     def setup_ilm
+      # Skip setup if using dynamic (sprintf) ILM configuration
+      return if ilm_has_sprintf?
+      
       logger.warn("Overwriting supplied index #{@index} with rollover alias #{@ilm_rollover_alias}") unless default_index?(@index)
       @index = @ilm_rollover_alias
       maybe_create_rollover_alias
       maybe_create_ilm_policy
+    end
+    
+    def ilm_has_sprintf?
+      (@ilm_rollover_alias && @ilm_rollover_alias.match(/%{.*?}/)) ||
+      (@ilm_policy && @ilm_policy.match(/%{.*?}/))
+    end
+
+    # Resolve ILM rollover alias for a specific event
+    def resolve_ilm_rollover_alias(event)
+      return @ilm_rollover_alias unless @ilm_rollover_alias
+      event.sprintf(@ilm_rollover_alias)
+    end
+    
+    # Resolve ILM policy name for a specific event
+    def resolve_ilm_policy(event)
+      return ilm_policy unless @ilm_policy
+      event.sprintf(@ilm_policy)
     end
 
     def ilm_in_use?
