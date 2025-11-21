@@ -21,13 +21,37 @@ module LogStash; module Outputs; class ElasticSearch
     # Resolve ILM rollover alias for a specific event
     def resolve_ilm_rollover_alias(event)
       return @ilm_rollover_alias unless @ilm_rollover_alias
-      event.sprintf(@ilm_rollover_alias)
+      resolved = event.sprintf(@ilm_rollover_alias)
+      
+      # Validate that the alias was properly resolved and is not empty
+      if resolved.nil? || resolved.empty?
+        raise EventMappingError, "ILM rollover alias resolved to empty string for pattern: #{@ilm_rollover_alias}"
+      end
+      
+      # Check if sprintf pattern wasn't resolved (still contains placeholders)
+      if resolved.match(/%{.*?}/)
+        raise EventMappingError, "ILM rollover alias contains unresolved placeholders: #{resolved}"
+      end
+      
+      resolved
     end
     
     # Resolve ILM policy name for a specific event
     def resolve_ilm_policy(event)
       return ilm_policy unless @ilm_policy
-      event.sprintf(@ilm_policy)
+      resolved = event.sprintf(@ilm_policy)
+      
+      # Validate that the policy name was properly resolved and is not empty
+      if resolved.nil? || resolved.empty?
+        raise EventMappingError, "ILM policy resolved to empty string for pattern: #{@ilm_policy}"
+      end
+      
+      # Check if sprintf pattern wasn't resolved (still contains placeholders)
+      if resolved.match(/%{.*?}/)
+        raise EventMappingError, "ILM policy contains unresolved placeholders: #{resolved}"
+      end
+      
+      resolved
     end
 
     def ilm_in_use?
