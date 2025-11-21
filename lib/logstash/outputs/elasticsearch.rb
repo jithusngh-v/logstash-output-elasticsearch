@@ -451,7 +451,17 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
   # Convert the event into a 3-tuple of action, params and event hash
   def event_action_tuple(event)
     # Ensure dynamic ILM alias exists before creating the tuple
-    ensure_dynamic_ilm_alias(event) if ilm_in_use? && ilm_has_sprintf?
+    if ilm_in_use? && ilm_has_sprintf?
+      begin
+        ensure_dynamic_ilm_alias(event)
+      rescue => e
+        @logger.error("Failed to ensure dynamic ILM alias", 
+                     :error => e.message,
+                     :event => event.to_hash_with_metadata,
+                     :backtrace => e.backtrace.first(10))
+        raise EventMappingError, "Failed to ensure dynamic ILM alias: #{e.message}"
+      end
+    end
     
     params = common_event_params(event)
     params[:_type] = get_event_type(event) if use_event_type?(nil)

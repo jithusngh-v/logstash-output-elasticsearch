@@ -6,7 +6,7 @@ ARG LOGSTASH_VERSION=8.4.0
 FROM opensearchproject/logstash-oss-with-opensearch-output-plugin:${LOGSTASH_VERSION}
 
 # Metadata labels for the image
-LABEL maintainer="your-team@company.com" \
+LABEL maintainer="jithsungh@pragmaticplay.com" \
       description="Logstash with Dynamic ILM Elasticsearch Output Plugin" \
       version="12.1.1" \
       plugin.version="12.1.1" \
