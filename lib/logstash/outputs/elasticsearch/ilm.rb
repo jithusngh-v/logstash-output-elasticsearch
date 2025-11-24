@@ -54,66 +54,200 @@ module LogStash; module Outputs; class ElasticSearch
       resolved
     end
 
-    # Ensure dynamic ILM rollover alias exists for a specific event
-    # This is called when using sprintf patterns in ilm_rollover_alias
-    def ensure_dynamic_ilm_alias(event)
-      return unless ilm_in_use? && ilm_has_sprintf?
+    # Pre-validate and ensure dynamic ILM infrastructure exists
+    # Called ONCE per unique alias at batch-processing time, NOT per event
+    # Returns true if alias is ready, false if it should be sent to DLQ
+    def ensure_dynamic_ilm_alias_batch(resolved_alias, resolved_policy)
+      return true unless ilm_in_use? && ilm_has_sprintf?
       
-      resolved_alias = resolve_ilm_rollover_alias(event)
-      resolved_policy = resolve_ilm_policy(event) if @ilm_policy
-      
-      # Thread-safe check and create
-      @dynamic_ilm_aliases_lock ||= Mutex.new
-      @dynamic_ilm_aliases_created ||= Set.new
-      
+      # Fast path: already validated and created
       alias_key = "#{resolved_alias}:#{resolved_policy}"
+      return true if dynamic_alias_ready?(alias_key)
       
-      return if @dynamic_ilm_aliases_created.include?(alias_key)
-      
-      @dynamic_ilm_aliases_lock.synchronize do
-        # Double-check inside the lock
-        return if @dynamic_ilm_aliases_created.include?(alias_key)
-        
-        # Check if policy exists (for custom policies)
-        if resolved_policy && resolved_policy != DEFAULT_POLICY
-          unless client.ilm_policy_exists?(resolved_policy)
-            raise LogStash::ConfigurationError, 
-                  "ILM policy '#{resolved_policy}' does not exist. Please create it first using: PUT _ilm/policy/#{resolved_policy}"
-          end
-        end
-        
-        # Create the rollover alias if it doesn't exist
-        unless client.rollover_alias_exists?(resolved_alias)
-          target = "<#{resolved_alias}-#{ilm_pattern}>"
-          payload = {
-            'aliases' => {
-              resolved_alias => {
-                'is_write_index' => true
-              }
-            },
-            'settings' => {
-              'index.lifecycle.name' => resolved_policy || DEFAULT_POLICY,
-              'index.lifecycle.rollover_alias' => resolved_alias
-            }
-          }
-          
-          logger.info("Creating dynamic ILM rollover alias", 
-                     :alias => resolved_alias, 
-                     :policy => resolved_policy || DEFAULT_POLICY,
-                     :target => target)
-          
-          client.rollover_alias_put(target, payload)
-        end
-        
-        @dynamic_ilm_aliases_created.add(alias_key)
-      end
+      # Slow path: need to create (only happens once per unique alias)
+      create_dynamic_ilm_infrastructure(resolved_alias, resolved_policy, alias_key)
     rescue => e
-      logger.error("Failed to create dynamic ILM alias", 
+      # Don't crash the pipeline - log and return false to route to DLQ
+      logger.error("Failed to ensure dynamic ILM infrastructure - event will be routed to DLQ", 
                   :alias => resolved_alias, 
                   :policy => resolved_policy,
                   :error => e.message,
-                  :backtrace => e.backtrace.first(5))
+                  :error_class => e.class.name)
+      false
+    end
+
+    # Fast, lock-free check if alias is ready
+    def dynamic_alias_ready?(alias_key)
+      @dynamic_ilm_aliases_ready ||= java.util.concurrent.ConcurrentHashMap.new
+      @dynamic_ilm_aliases_ready.get(alias_key)
+    end
+
+    # Mark alias as ready (thread-safe, lock-free)
+    def mark_alias_ready(alias_key)
+      @dynamic_ilm_aliases_ready ||= java.util.concurrent.ConcurrentHashMap.new
+      @dynamic_ilm_aliases_ready.put(alias_key, true)
+    end
+
+    # Create dynamic ILM infrastructure (template + alias + policy check)
+    # Uses single lock for initialization, but caching prevents repeated calls
+    def create_dynamic_ilm_infrastructure(resolved_alias, resolved_policy, alias_key)
+      @dynamic_ilm_creation_lock ||= Mutex.new
+      
+      @dynamic_ilm_creation_lock.synchronize do
+        # Double-check: another thread may have created it
+        return true if dynamic_alias_ready?(alias_key)
+        
+        # Cardinality protection: prevent runaway alias creation
+        check_alias_cardinality!
+        
+        # Step 1: Create template (if not exists)
+        ensure_dynamic_ilm_template(resolved_alias, resolved_policy)
+        
+        # Step 2: Verify policy exists
+        verify_ilm_policy_exists(resolved_policy)
+        
+        # Step 3: Create alias (idempotent)
+        create_rollover_alias(resolved_alias, resolved_policy)
+        
+        # Step 4: Mark as ready
+        mark_alias_ready(alias_key)
+        
+        logger.info("Dynamic ILM infrastructure ready", 
+                   :alias => resolved_alias, 
+                   :policy => resolved_policy || DEFAULT_POLICY)
+        
+        true
+      end
+    end
+
+    # Cardinality protection: prevent cluster state explosion
+    def check_alias_cardinality!
+      @dynamic_ilm_aliases_ready ||= java.util.concurrent.ConcurrentHashMap.new
+      max_aliases = @dynamic_ilm_max_aliases || 1000  # Configurable limit
+      
+      if @dynamic_ilm_aliases_ready.size >= max_aliases
+        raise LogStash::ConfigurationError, 
+              "Dynamic ILM alias limit reached (#{max_aliases}). " +
+              "This prevents cluster state explosion. " +
+              "Check your sprintf pattern for high cardinality fields."
+      end
+    end
+
+    # Verify ILM policy exists (fail fast if missing)
+    def verify_ilm_policy_exists(resolved_policy)
+      return if !resolved_policy || resolved_policy == DEFAULT_POLICY
+      
+      unless client.ilm_policy_exists?(resolved_policy)
+        raise LogStash::ConfigurationError, 
+              "ILM policy '#{resolved_policy}' does not exist in Elasticsearch. " +
+              "Create it first: PUT _ilm/policy/#{resolved_policy}"
+      end
+    end
+
+    # Create rollover alias (idempotent - safe to call multiple times)
+    def create_rollover_alias(resolved_alias, resolved_policy)
+      return if client.rollover_alias_exists?(resolved_alias)
+      
+      target = "<#{resolved_alias}-#{ilm_pattern}>"
+      payload = {
+        'aliases' => {
+          resolved_alias => {
+            'is_write_index' => true
+          }
+        },
+        'settings' => {
+          'index.lifecycle.name' => resolved_policy || DEFAULT_POLICY,
+          'index.lifecycle.rollover_alias' => resolved_alias
+        }
+      }
+      
+      logger.info("Creating dynamic ILM rollover alias", 
+                 :alias => resolved_alias, 
+                 :policy => resolved_policy || DEFAULT_POLICY,
+                 :target => target)
+      
+      client.rollover_alias_put(target, payload)
+    rescue ::LogStash::Outputs::ElasticSearch::HttpClient::Pool::BadResponseCodeError => e
+      # If alias was created by another node/worker between check and create, that's fine
+      if e.response_code == 400 && e.message =~ /resource_already_exists/i
+        logger.debug("Alias already exists (race condition with another node)", 
+                    :alias => resolved_alias)
+        return
+      end
       raise
+    end
+
+    # Create a template specific to this alias to avoid field mapping conflicts
+    # This is crucial when different containers have different field schemas
+    # Idempotent: safe to call multiple times
+    def ensure_dynamic_ilm_template(resolved_alias, resolved_policy)
+      @dynamic_ilm_templates_created ||= java.util.concurrent.ConcurrentHashMap.new
+      
+      # Fast path: already created
+      return if @dynamic_ilm_templates_created.get(resolved_alias)
+      
+      # Use logstash-{container_name} naming pattern for templates
+      template_name = "logstash-#{resolved_alias}"
+      index_pattern = "#{resolved_alias}-*"
+      template_endpoint = TemplateManager.template_endpoint(self)
+      
+      # Check if template already exists (maybe created manually or by another instance)
+      if client.template_exists?(template_endpoint, template_name)
+        logger.debug("Template already exists, skipping creation", 
+                    :template => template_name)
+        @dynamic_ilm_templates_created.put(resolved_alias, true)
+        return
+      end
+      
+      # Build template with ILM settings
+      template = build_dynamic_template(index_pattern, resolved_policy)
+      
+      logger.info("Creating dynamic ILM template for container-specific mappings", 
+                 :template_name => template_name,
+                 :index_pattern => index_pattern,
+                 :policy => resolved_policy || DEFAULT_POLICY)
+      
+      # Install the template
+      TemplateManager.install(client, template_endpoint, template_name, template, true)
+      
+      @dynamic_ilm_templates_created.put(resolved_alias, true)
+    rescue ::LogStash::Outputs::ElasticSearch::HttpClient::Pool::BadResponseCodeError => e
+      # If template creation fails due to "already exists", that's fine (race condition)
+      if e.response_code == 400 && e.message =~ /resource_already_exists/i
+        logger.debug("Template already exists (race condition)", 
+                    :template => template_name)
+        @dynamic_ilm_templates_created.put(resolved_alias, true)
+        return
+      end
+      
+      logger.error("Failed to create dynamic ILM template", 
+                  :template => template_name,
+                  :error => e.message)
+      raise
+    end
+    
+    # Build a template for dynamic ILM with container-specific pattern
+    def build_dynamic_template(index_pattern, resolved_policy)
+      template = if @template
+        # User provided custom template - use it
+        TemplateManager.read_template_file(@template)
+      else
+        # Use default template based on ES version
+        TemplateManager.load_default_template(maximum_seen_major_version, ecs_compatibility)
+      end
+      
+      # Set index pattern for this specific container
+      template.delete('template') if template.include?('template') && maximum_seen_major_version == 7
+      template['index_patterns'] = [index_pattern]
+      
+      # Add ILM settings
+      settings = TemplateManager.resolve_template_settings(self, template)
+      settings.update({
+        'index.lifecycle.name' => resolved_policy || DEFAULT_POLICY,
+        'index.lifecycle.rollover_alias' => index_pattern.gsub(/-\*$/, '')  # Remove trailing -*
+      })
+      
+      template
     end
 
     def ilm_in_use?

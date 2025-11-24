@@ -396,6 +396,13 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
   def safe_interpolation_map_events(events)
     successful_events = [] # list of LogStash::Outputs::ElasticSearch::EventActionTuple
     event_mapping_errors = [] # list of FailedEventMapping
+    
+    # PERFORMANCE FIX: Pre-validate dynamic ILM aliases ONCE per batch
+    # Instead of checking per-event, collect unique aliases and validate them first
+    if ilm_in_use? && ilm_has_sprintf?
+      pre_validate_dynamic_ilm_aliases(events, event_mapping_errors)
+    end
+    
     events.each do |event|
       begin
         successful_events << @event_mapper.call(event)
@@ -404,6 +411,49 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
       end
     end
     MapEventsResult.new(successful_events, event_mapping_errors)
+  end
+  
+  # Pre-validate dynamic ILM aliases for the entire batch
+  # This moves expensive operations OUT of the event loop
+  def pre_validate_dynamic_ilm_aliases(events, event_mapping_errors)
+    unique_aliases = {}
+    
+    # Collect unique alias/policy combinations
+    events.each do |event|
+      begin
+        resolved_alias = resolve_ilm_rollover_alias(event)
+        resolved_policy = @ilm_policy ? resolve_ilm_policy(event) : nil
+        alias_key = "#{resolved_alias}:#{resolved_policy}"
+        unique_aliases[alias_key] = [resolved_alias, resolved_policy]
+      rescue EventMappingError => e
+        # If resolution fails, add to errors and skip event
+        event_mapping_errors << FailedEventMapping.new(event, e.message)
+        events.delete(event)
+      end
+    end
+    
+    # Ensure infrastructure exists for each unique alias (parallelizable)
+    unique_aliases.each do |alias_key, (resolved_alias, resolved_policy)|
+      unless ensure_dynamic_ilm_alias_batch(resolved_alias, resolved_policy)
+        # Failed to create infrastructure - remove all events with this alias
+        @logger.warn("Removing events with failed alias from batch", 
+                    :alias => resolved_alias, 
+                    :policy => resolved_policy)
+        events.delete_if do |event|
+          begin
+            event_alias = resolve_ilm_rollover_alias(event)
+            event_policy = @ilm_policy ? resolve_ilm_policy(event) : nil
+            if event_alias == resolved_alias && event_policy == resolved_policy
+              event_mapping_errors << FailedEventMapping.new(event, 
+                "Dynamic ILM infrastructure creation failed for alias: #{resolved_alias}")
+              true
+            end
+          rescue
+            false
+          end
+        end
+      end
+    end
   end
 
   public
@@ -450,19 +500,6 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
 
   # Convert the event into a 3-tuple of action, params and event hash
   def event_action_tuple(event)
-    # Ensure dynamic ILM alias exists before creating the tuple
-    if ilm_in_use? && ilm_has_sprintf?
-      begin
-        ensure_dynamic_ilm_alias(event)
-      rescue => e
-        @logger.error("Failed to ensure dynamic ILM alias", 
-                     :error => e.message,
-                     :event => event.to_hash_with_metadata,
-                     :backtrace => e.backtrace.first(10))
-        raise EventMappingError, "Failed to ensure dynamic ILM alias: #{e.message}"
-      end
-    end
-    
     params = common_event_params(event)
     params[:_type] = get_event_type(event) if use_event_type?(nil)
 

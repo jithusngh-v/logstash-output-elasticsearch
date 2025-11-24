@@ -7,6 +7,15 @@ module LogStash; module Outputs; class ElasticSearch
     def self.install_template(plugin)
       return unless plugin.manage_template
 
+      # Skip STATIC template installation for dynamic ILM configurations
+      # Templates will be created dynamically per-alias to avoid field mapping conflicts between different containers
+      if plugin.ilm_in_use? && plugin.ilm_has_sprintf?
+        plugin.logger.info("Skipping static template installation for dynamic ILM configuration",
+                          :ilm_rollover_alias => plugin.ilm_rollover_alias,
+                          :reason => "Templates will be created dynamically per container to avoid field type conflicts")
+        return
+      end
+
       if plugin.maximum_seen_major_version < 8 && plugin.template_api == 'auto'
         plugin.logger.warn("`template_api => auto` resolved to `legacy` since we are connected to " + "Elasticsearch #{plugin.maximum_seen_major_version}, " +
                            "but will resolve to `composable` the first time it connects to Elasticsearch 8+. " +
@@ -32,7 +41,15 @@ module LogStash; module Outputs; class ElasticSearch
       install(plugin.client, template_endpoint(plugin), template_name(plugin), template, plugin.template_overwrite)
     end
 
-    private
+    # Make these methods public so ILM module can use them for dynamic template creation
+    def self.install(client, template_endpoint, template_name, template, template_overwrite)
+      client.template_install(template_endpoint, template_name, template, template_overwrite)
+    end
+
+    def self.template_endpoint(plugin)
+      index_template_api?(plugin) ? INDEX_TEMPLATE_ENDPOINT : LEGACY_TEMPLATE_ENDPOINT
+    end
+
     def self.load_default_template(es_major_version, ecs_compatibility)
       template_path = default_template_path(es_major_version, ecs_compatibility)
       read_template_file(template_path)
@@ -40,20 +57,12 @@ module LogStash; module Outputs; class ElasticSearch
       raise LogStash::ConfigurationError, "Failed to load default template for Elasticsearch v#{es_major_version} with ECS #{ecs_compatibility}; caused by: #{e.inspect}"
     end
 
-    def self.install(client, template_endpoint, template_name, template, template_overwrite)
-      client.template_install(template_endpoint, template_name, template, template_overwrite)
-    end
-
-    def self.add_ilm_settings_to_template(plugin, template)
-      # Overwrite any index patterns, and use the rollover alias. Use 'index_patterns' rather than 'template' for pattern
-      # definition - remove any existing definition of 'template'
-      template.delete('template') if template.include?('template') if plugin.maximum_seen_major_version == 7
-      template['index_patterns'] = "#{plugin.ilm_rollover_alias}-*"
-      settings = resolve_template_settings(plugin, template)
-      if settings && (settings['index.lifecycle.name'] || settings['index.lifecycle.rollover_alias'])
-        plugin.logger.info("Overwriting index lifecycle name and rollover alias as ILM is enabled")
-      end
-      settings.update({ 'index.lifecycle.name' => plugin.ilm_policy, 'index.lifecycle.rollover_alias' => plugin.ilm_rollover_alias})
+    def self.read_template_file(template_path)
+      raise LogStash::ConfigurationError, "Template file '#{template_path}' could not be found" unless ::File.exists?(template_path)
+      template_data = ::IO.read(template_path)
+      LogStash::Json.load(template_data)
+    rescue => e
+      raise LogStash::ConfigurationError, "Failed to load template file '#{template_path}': #{e.message}"
     end
 
     def self.resolve_template_settings(plugin, template)
@@ -98,16 +107,18 @@ module LogStash; module Outputs; class ElasticSearch
       ::File.expand_path(default_template_name, ::File.dirname(__FILE__))
     end
 
-    def self.read_template_file(template_path)
-      raise LogStash::ConfigurationError, "Template file '#{template_path}' could not be found" unless ::File.exists?(template_path)
-      template_data = ::IO.read(template_path)
-      LogStash::Json.load(template_data)
-    rescue => e
-      raise LogStash::ConfigurationError, "Failed to load template file '#{template_path}': #{e.message}"
-    end
+    private
 
-    def self.template_endpoint(plugin)
-      index_template_api?(plugin) ? INDEX_TEMPLATE_ENDPOINT : LEGACY_TEMPLATE_ENDPOINT
+    def self.add_ilm_settings_to_template(plugin, template)
+      # Overwrite any index patterns, and use the rollover alias. Use 'index_patterns' rather than 'template' for pattern
+      # definition - remove any existing definition of 'template'
+      template.delete('template') if template.include?('template') if plugin.maximum_seen_major_version == 7
+      template['index_patterns'] = "#{plugin.ilm_rollover_alias}-*"
+      settings = resolve_template_settings(plugin, template)
+      if settings && (settings['index.lifecycle.name'] || settings['index.lifecycle.rollover_alias'])
+        plugin.logger.info("Overwriting index lifecycle name and rollover alias as ILM is enabled")
+      end
+      settings.update({ 'index.lifecycle.name' => plugin.ilm_policy, 'index.lifecycle.rollover_alias' => plugin.ilm_rollover_alias})
     end
 
     def self.index_template_api?(plugin)
