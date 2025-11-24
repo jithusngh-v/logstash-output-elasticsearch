@@ -243,6 +243,10 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
   # ILM policy to use, if undefined the default policy will be used.
   config :ilm_policy, :validate => :string, :default => DEFAULT_POLICY
 
+  # Maximum number of dynamic ILM aliases allowed (for sprintf patterns)
+  # This prevents cluster state explosion from high-cardinality fields
+  config :dynamic_ilm_max_aliases, :validate => :number, :default => 1000
+
   attr_reader :client
   attr_reader :default_index
   attr_reader :default_ilm_rollover_alias
@@ -400,7 +404,7 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
     # PERFORMANCE FIX: Pre-validate dynamic ILM aliases ONCE per batch
     # Instead of checking per-event, collect unique aliases and validate them first
     if ilm_in_use? && ilm_has_sprintf?
-      pre_validate_dynamic_ilm_aliases(events, event_mapping_errors)
+      events = pre_validate_dynamic_ilm_aliases(events, event_mapping_errors)
     end
     
     events.each do |event|
@@ -415,45 +419,57 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
   
   # Pre-validate dynamic ILM aliases for the entire batch
   # This moves expensive operations OUT of the event loop
+  # Returns filtered array of valid events (non-mutating)
   def pre_validate_dynamic_ilm_aliases(events, event_mapping_errors)
     unique_aliases = {}
+    failed_events = Set.new  # Track events to remove
+    event_alias_map = {}     # Cache resolved aliases per event
     
-    # Collect unique alias/policy combinations
+    # Phase 1: Collect unique alias/policy combinations (no mutation)
     events.each do |event|
       begin
         resolved_alias = resolve_ilm_rollover_alias(event)
         resolved_policy = @ilm_policy ? resolve_ilm_policy(event) : nil
         alias_key = "#{resolved_alias}:#{resolved_policy}"
         unique_aliases[alias_key] = [resolved_alias, resolved_policy]
+        event_alias_map[event.get('[@metadata][_id]') || event.hash] = [resolved_alias, resolved_policy]
       rescue EventMappingError => e
-        # If resolution fails, add to errors and skip event
+        # If resolution fails, mark for removal
         event_mapping_errors << FailedEventMapping.new(event, e.message)
-        events.delete(event)
+        failed_events.add(event)
       end
     end
     
-    # Ensure infrastructure exists for each unique alias (parallelizable)
+    # Phase 2: Ensure infrastructure exists for each unique alias
+    failed_aliases = Set.new
     unique_aliases.each do |alias_key, (resolved_alias, resolved_policy)|
       unless ensure_dynamic_ilm_alias_batch(resolved_alias, resolved_policy)
-        # Failed to create infrastructure - remove all events with this alias
-        @logger.warn("Removing events with failed alias from batch", 
+        @logger.warn("Failed to create dynamic ILM infrastructure for alias", 
                     :alias => resolved_alias, 
                     :policy => resolved_policy)
-        events.delete_if do |event|
-          begin
-            event_alias = resolve_ilm_rollover_alias(event)
-            event_policy = @ilm_policy ? resolve_ilm_policy(event) : nil
-            if event_alias == resolved_alias && event_policy == resolved_policy
-              event_mapping_errors << FailedEventMapping.new(event, 
-                "Dynamic ILM infrastructure creation failed for alias: #{resolved_alias}")
-              true
-            end
-          rescue
-            false
+        failed_aliases.add(alias_key)
+      end
+    end
+    
+    # Phase 3: Mark events with failed aliases for removal
+    unless failed_aliases.empty?
+      events.each do |event|
+        next if failed_events.include?(event)
+        event_id = event.get('[@metadata][_id]') || event.hash
+        if event_alias_map[event_id]
+          resolved_alias, resolved_policy = event_alias_map[event_id]
+          alias_key = "#{resolved_alias}:#{resolved_policy}"
+          if failed_aliases.include?(alias_key)
+            event_mapping_errors << FailedEventMapping.new(event, 
+              "Dynamic ILM infrastructure creation failed for alias: #{resolved_alias}")
+            failed_events.add(event)
           end
         end
       end
     end
+    
+    # Phase 4: Return filtered events array (non-destructive)
+    failed_events.empty? ? events : events.reject { |e| failed_events.include?(e) }
   end
 
   public

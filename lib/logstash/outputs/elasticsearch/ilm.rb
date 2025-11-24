@@ -1,3 +1,5 @@
+require 'concurrent'
+
 module LogStash; module Outputs; class ElasticSearch
   module Ilm
 
@@ -20,7 +22,9 @@ module LogStash; module Outputs; class ElasticSearch
 
     # Resolve ILM rollover alias for a specific event
     def resolve_ilm_rollover_alias(event)
-      return @ilm_rollover_alias unless @ilm_rollover_alias
+      # If no alias configured or it doesn't contain sprintf, return as-is
+      return @ilm_rollover_alias if @ilm_rollover_alias.nil? || !@ilm_rollover_alias.match(/%{.*?}/)
+      
       resolved = event.sprintf(@ilm_rollover_alias)
       
       # Validate that the alias was properly resolved and is not empty
@@ -38,7 +42,9 @@ module LogStash; module Outputs; class ElasticSearch
     
     # Resolve ILM policy name for a specific event
     def resolve_ilm_policy(event)
-      return ilm_policy unless @ilm_policy
+      # If no policy configured or it doesn't contain sprintf, return as-is
+      return @ilm_policy if @ilm_policy.nil? || !@ilm_policy.match(/%{.*?}/)
+      
       resolved = event.sprintf(@ilm_policy)
       
       # Validate that the policy name was properly resolved and is not empty
@@ -78,14 +84,14 @@ module LogStash; module Outputs; class ElasticSearch
 
     # Fast, lock-free check if alias is ready
     def dynamic_alias_ready?(alias_key)
-      @dynamic_ilm_aliases_ready ||= java.util.concurrent.ConcurrentHashMap.new
-      @dynamic_ilm_aliases_ready.get(alias_key)
+      @dynamic_ilm_aliases_ready ||= Concurrent::Map.new
+      !!@dynamic_ilm_aliases_ready[alias_key]
     end
 
     # Mark alias as ready (thread-safe, lock-free)
     def mark_alias_ready(alias_key)
-      @dynamic_ilm_aliases_ready ||= java.util.concurrent.ConcurrentHashMap.new
-      @dynamic_ilm_aliases_ready.put(alias_key, true)
+      @dynamic_ilm_aliases_ready ||= Concurrent::Map.new
+      @dynamic_ilm_aliases_ready[alias_key] = true
     end
 
     # Create dynamic ILM infrastructure (template + alias + policy check)
@@ -122,7 +128,7 @@ module LogStash; module Outputs; class ElasticSearch
 
     # Cardinality protection: prevent cluster state explosion
     def check_alias_cardinality!
-      @dynamic_ilm_aliases_ready ||= java.util.concurrent.ConcurrentHashMap.new
+      @dynamic_ilm_aliases_ready ||= Concurrent::Map.new
       max_aliases = @dynamic_ilm_max_aliases || 1000  # Configurable limit
       
       if @dynamic_ilm_aliases_ready.size >= max_aliases
@@ -148,7 +154,7 @@ module LogStash; module Outputs; class ElasticSearch
     def create_rollover_alias(resolved_alias, resolved_policy)
       return if client.rollover_alias_exists?(resolved_alias)
       
-      target = "<#{resolved_alias}-#{ilm_pattern}>"
+      target = "#{resolved_alias}-#{@ilm_pattern}"
       payload = {
         'aliases' => {
           resolved_alias => {
@@ -181,10 +187,10 @@ module LogStash; module Outputs; class ElasticSearch
     # This is crucial when different containers have different field schemas
     # Idempotent: safe to call multiple times
     def ensure_dynamic_ilm_template(resolved_alias, resolved_policy)
-      @dynamic_ilm_templates_created ||= java.util.concurrent.ConcurrentHashMap.new
+      @dynamic_ilm_templates_created ||= Concurrent::Map.new
       
       # Fast path: already created
-      return if @dynamic_ilm_templates_created.get(resolved_alias)
+      return if @dynamic_ilm_templates_created[resolved_alias]
       
       # Use logstash-{container_name} naming pattern for templates
       template_name = "logstash-#{resolved_alias}"
@@ -195,7 +201,7 @@ module LogStash; module Outputs; class ElasticSearch
       if client.template_exists?(template_endpoint, template_name)
         logger.debug("Template already exists, skipping creation", 
                     :template => template_name)
-        @dynamic_ilm_templates_created.put(resolved_alias, true)
+        @dynamic_ilm_templates_created[resolved_alias] = true
         return
       end
       
@@ -210,13 +216,13 @@ module LogStash; module Outputs; class ElasticSearch
       # Install the template
       TemplateManager.install(client, template_endpoint, template_name, template, true)
       
-      @dynamic_ilm_templates_created.put(resolved_alias, true)
+      @dynamic_ilm_templates_created[resolved_alias] = true
     rescue ::LogStash::Outputs::ElasticSearch::HttpClient::Pool::BadResponseCodeError => e
       # If template creation fails due to "already exists", that's fine (race condition)
       if e.response_code == 400 && e.message =~ /resource_already_exists/i
         logger.debug("Template already exists (race condition)", 
                     :template => template_name)
-        @dynamic_ilm_templates_created.put(resolved_alias, true)
+        @dynamic_ilm_templates_created[resolved_alias] = true
         return
       end
       
