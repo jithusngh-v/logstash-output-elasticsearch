@@ -23,18 +23,33 @@ This enhancement introduces **dynamic ILM configuration** support using sprintf 
 
    ```ruby
    # Current approach - 150+ similar blocks
-   if [field] == "value1" {
-     elasticsearch {
-       ilm_rollover_alias => "alias-1"
-       ilm_policy => "policy-1"
-     }
-   } else if [field] == "value2" {
-     elasticsearch {
-       ilm_rollover_alias => "alias-2"
-       ilm_policy => "policy-2"
-     }
-   }
-   # ... 148 more conditions
+    if [container_name] == "alertsworker" {
+        elasticsearch {
+          hosts => ["eck-es-http:9200"]
+          user => "${ES_USER}"
+          password => "${ES_PASSWORD}"
+          ecs_compatibility => "disabled"
+          ssl => false
+          ilm_enabled => true
+          ilm_rollover_alias => "alertsworker"
+          ilm_pattern => "000001"
+          ilm_policy => "common-ilm-policy"
+        }
+    }
+    else if [container_name] == "archivecleanup" {
+        elasticsearch {
+          hosts => ["eck-es-http:9200"]
+          user => "${ES_USER}"
+          password => "${ES_PASSWORD}"
+          ecs_compatibility => "disabled"
+          ssl => false
+          ilm_enabled => true
+          ilm_rollover_alias => "archivecleanup"
+          ilm_pattern => "000001"
+          ilm_policy => "common-ilm-policy"
+        }
+    }
+   # ... 150+ more conditions
    ```
 
 2. **Maintenance Overhead**: Each new index pattern requires configuration updates and redeployment
@@ -54,15 +69,15 @@ Enable dynamic resolution using event field values:
 ```ruby
 elasticsearch {
   ilm_enabled => true
-  ilm_rollover_alias => "logs-%{[application]}"
-  ilm_policy => "policy-%{[log_level]}"
+  ilm_rollover_alias => "%{[container_name]}"
+  ilm_policy => "%{[container_name]}-ilm-policy"
 }
 ```
 
-**Example**: An event with `application: "web-app"` and `log_level: "critical"` automatically routes to:
+**Example**: An event with `container_name: "uibackend"` automatically routes to:
 
-- Rollover Alias: `logs-web-app`
-- ILM Policy: `policy-critical`
+- Rollover Alias: `uibackend`
+- ILM Policy: `uibackend-ilm-policy`
 
 ---
 
@@ -80,7 +95,7 @@ elasticsearch {
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ 2. Runtime Event Processing                                  │
+│ 2. Runtime Event Processing                                 │
 │    - All events use the same pre-configured alias           │
 │    - No per-event customization possible                    │
 │    - No dynamic alias creation                              │
@@ -100,41 +115,41 @@ elasticsearch {
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ 1. Configuration Phase (Plugin Startup)                     │
-│    - Detect sprintf patterns in ilm_rollover_alias         │
+│    - Detect sprintf patterns in ilm_rollover_alias          │
 │    - Skip static alias creation if patterns detected        │
-│    - Initialize thread-safe tracking structures            │
-│    - Initialize Mutex and Set for dynamic aliases          │
+│    - Initialize thread-safe tracking structures             │
+│    - Initialize Mutex and Set for dynamic aliases           │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ 2. Runtime Event Processing (Per Event)                     │
-│                                                              │
+│                                                             │
 │  ┌────────────────────────────────────────────────────────┐ │
-│  │ event_action_tuple(event) - Entry Point               │ │
+│  │ event_action_tuple(event) - Entry Point                │ │
 │  │  ↓                                                     │ │
-│  │  Check: ilm_in_use? && ilm_has_sprintf?              │ │
+│  │  Check: ilm_in_use? && ilm_has_sprintf?                │ │
 │  │  ↓                                                     │ │
-│  │  Call: ensure_dynamic_ilm_alias(event)                │ │
+│  │  Call: ensure_dynamic_ilm_alias(event)                 │ │
 │  └────────────────────────────────────────────────────────┘ │
-│                            ↓                                 │
+│                            ↓                                │
 │  ┌────────────────────────────────────────────────────────┐ │
-│  │ ensure_dynamic_ilm_alias(event)                       │ │
-│  │  1. Resolve alias pattern: "logs-%{app}" → "logs-web" │ │
-│  │  2. Resolve policy pattern: "pol-%{env}" → "pol-prod" │ │
-│  │  3. Check cache: alias:policy already created?        │ │
-│  │  4. If not cached:                                    │ │
-│  │     a. Acquire mutex lock                             │ │
-│  │     b. Double-check (prevent race conditions)         │ │
-│  │     c. Verify policy exists (if custom)               │ │
-│  │     d. Create rollover alias if missing               │ │
-│  │     e. Add to cache                                   │ │
-│  │     f. Release lock                                   │ │
+│  │ ensure_dynamic_ilm_alias(event)                        │ │
+│  │  1. Resolve alias pattern: "%{contain.}" → "e3d"       │ │
+│  │  2. Resolve policy pattern: "%{c}-ilm-p" → "e3d-ilm-"  │ │
+│  │  3. Check cache: alias:policy already created?         │ │
+│  │  4. If not cached:                                     │ │
+│  │     a. Acquire mutex lock                              │ │
+│  │     b. Double-check (prevent race conditions)          │ │
+│  │     c. Verify policy exists (if custom)                │ │
+│  │     d. Create rollover alias if missing                │ │
+│  │     e. Add to cache                                    │ │
+│  │     f. Release lock                                    │ │
 │  └────────────────────────────────────────────────────────┘ │
-│                            ↓                                 │
+│                            ↓                                │
 │  ┌────────────────────────────────────────────────────────┐ │
-│  │ resolve_index!(event, event_index)                    │ │
-│  │  - Return resolved rollover alias as target index     │ │
-│  │  - Skip normal index resolution logic                 │ │
+│  │ resolve_index!(event, event_index)                     │ │
+│  │  - Return resolved rollover alias as target index      │ │
+│  │  - Skip normal index resolution logic                  │ │
 │  └────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -161,7 +176,7 @@ def ilm_has_sprintf?
 end
 ```
 
-**Purpose**: Identifies if configuration contains sprintf patterns (e.g., `%{field}`)  
+**Purpose**: Identifies if configuration contains sprintf patterns (e.g., `%{container_name}`)  
 **Impact**: Determines whether to use static or dynamic workflow
 
 ---
@@ -182,7 +197,7 @@ end
 ```
 
 **Purpose**: Prevents static alias creation when using dynamic patterns  
-**Rationale**: Static setup would fail with unresolved patterns like `logs-%{app}`
+**Rationale**: Static setup would fail with unresolved patterns like `%{[container_name]}`
 
 ---
 
@@ -207,7 +222,7 @@ def resolve_ilm_rollover_alias(event)
 end
 ```
 
-**Purpose**: Converts pattern `logs-%{application}` to concrete value `logs-web-app`  
+**Purpose**: Converts pattern `%{[container_name]}` to concrete value `uibakend`  
 **Safety**: Validates successful resolution and prevents malformed aliases
 
 ---
@@ -457,7 +472,7 @@ end
 
 ```
 Event: {"message": "test"}
-Pattern: logs-%{[application]}
+Pattern: %{[container_name]}
 Result: EventMappingError - "ILM rollover alias contains unresolved placeholders"
 Action: Event sent to Dead Letter Queue (if configured)
 ```
@@ -465,9 +480,9 @@ Action: Event sent to Dead Letter Queue (if configured)
 ### 2. Non-Existent Custom Policy
 
 ```
-Event: {"application": "web"}
-Config: ilm_policy => "custom-%{[application]}"
-Result: ConfigurationError - "ILM policy 'custom-web' does not exist"
+Event: {"container_name": "uibackend"}
+Config: ilm_policy => "%{[container_name]-ilm-policy}"
+Result: ConfigurationError - "ILM policy 'uibackend-ilm-policy' does not exist"
 Action: Pipeline stops, requires policy creation
 ```
 
@@ -497,18 +512,34 @@ Outcome: Single alias created, all events indexed successfully
 
 ```ruby
 output {
-  if [application] == "web" {
-    elasticsearch {
-      ilm_rollover_alias => "logs-web"
-      ilm_policy => "policy-30days"
+    # Current approach - 150+ similar blocks
+    if [container_name] == "alertsworker" {
+        elasticsearch {
+          hosts => ["eck-es-http:9200"]
+          user => "${ES_USER}"
+          password => "${ES_PASSWORD}"
+          ecs_compatibility => "disabled"
+          ssl => false
+          ilm_enabled => true
+          ilm_rollover_alias => "alertsworker"
+          ilm_pattern => "000001"
+          ilm_policy => "common-ilm-policy"
+        }
     }
-  } else if [application] == "api" {
-    elasticsearch {
-      ilm_rollover_alias => "logs-api"
-      ilm_policy => "policy-90days"
+    else if [container_name] == "archivecleanup" {
+        elasticsearch {
+          hosts => ["eck-es-http:9200"]
+          user => "${ES_USER}"
+          password => "${ES_PASSWORD}"
+          ecs_compatibility => "disabled"
+          ssl => false
+          ilm_enabled => true
+          ilm_rollover_alias => "archivecleanup"
+          ilm_pattern => "000001"
+          ilm_policy => "common-ilm-policy"
+        }
     }
-  }
-  # ... 148 more blocks
+   # ... 150+ more conditions
 }
 ```
 
@@ -516,12 +547,18 @@ output {
 
 ```ruby
 output {
-  elasticsearch {
-    ilm_enabled => true
-    ilm_rollover_alias => "logs-%{[application]}"
-    ilm_policy => "policy-%{[retention_days]}days"
-  }
-}
+      elasticsearch {
+        hosts => ["eck-es-http:9200"]
+        user => "${ES_USER}"
+        password => "${ES_PASSWORD}"
+        ecs_compatibility => "disabled"
+        ssl_enabled => false
+        ilm_enabled => true
+        ilm_rollover_alias => "%{[container_name]}"
+        ilm_pattern => "000001"
+        ilm_policy => "%{[container_name]}-ilm-policy"
+      }
+    }
 ```
 
 ### Migration Steps
@@ -591,7 +628,7 @@ elasticsearch {
 # Configuration
 elasticsearch {
   ilm_enabled => true
-  ilm_rollover_alias => "logs-%{[application]}"
+  ilm_rollover_alias => "logstash-%{[container_name]}"
   ilm_auto_template => true
   ilm_template_mappings => {
     "keyword_fields" => "%{[schema_keywords]}"
@@ -881,7 +918,7 @@ elasticsearch {
 
 - **ILM**: Index Lifecycle Management - Elasticsearch feature for automatic index management
 - **Rollover Alias**: Alias that points to actively written index, automatically switches during rollover
-- **sprintf Pattern**: String interpolation syntax using `%{field}` notation
+- **sprintf Pattern**: String interpolation syntax using `%{container_name}` notation
 - **Double-Checked Locking**: Concurrency pattern to minimize lock contention
 - **Just-In-Time Creation**: Creating resources only when first needed
 
