@@ -628,7 +628,109 @@ elasticsearch {
 # Configuration
 elasticsearch {
   ilm_enabled => true
-  ilm_rollover_alias => "logstash-%{[container_name]}"
+  ilm_rollover_alias => "logstash-%{[container_namebdata:
+  logstash.conf: |-
+    input {
+      kafka {
+        bootstrap_servers => "10.50.0.199:9092"
+        topics => ["dev.test"]
+        group_id => "logstash-test"
+        enable_auto_commit => false
+        consumer_threads => 20
+        max_poll_records => 500
+        max_poll_interval_ms => 300000
+        codec => json
+        decorate_events => true
+        session_timeout_ms => 60000
+        heartbeat_interval_ms => 10000
+        fetch_min_bytes => 1024
+        fetch_max_bytes => 52428800
+        max_partition_fetch_bytes => 10485760
+        connections_max_idle_ms => 540000
+        request_timeout_ms => 305000
+      }
+    }
+
+    filter {
+      if [kubernetes][container_name]
+        {
+        ruby {
+          code => '
+            c = event.get("[kubernetes][container_name]")
+            event.set("container_name", c.is_a?(Array) ? c.first : c)
+          '
+        }
+      }
+
+      if [container_name] == "dotcms" {
+        grok {
+          match => {
+            "log" => "%{TIME:time}%{SPACE}%{LOGLEVEL:log_level}%{SPACE}%{DATA:component}%{SPACE}-%{SPACE}%{GREEDYDATA:log_message}"
+          }
+          tag_on_failure => []
+        }
+        mutate {
+          lowercase => ["log_level"]
+
+          add_field => {
+            "full_timestamp" => "%{+YYYY-MM-dd} %{time}"
+            "[json][Service]" => "dotcms"
+          }
+        }
+        date {
+          match => ["full_timestamp", "YYYY-MM-dd HH:mm:ss.SSS"]
+          target => "@timestamp"
+        }
+        mutate {
+          remove_field => ["full_timestamp", "time"]
+        }
+      }
+      else if [kubernetes] {
+        grok {
+          match => {
+            "log" => "%{TIMESTAMP_ISO8601:timestamp}%{SPACE}\[%{LOGLEVEL:level}\]%{SPACE}%{QUOTEDSTRING:msg}%{SPACE}%{GREEDYDATA:json}"
+          }
+          pattern_definitions => { "JSON" => "{.*$" }
+          tag_on_failure => []
+        }
+        json {
+          skip_on_invalid_json => true
+          source => "json"
+          target => "json"
+          add_tag => ["_message_json_parsed"]
+        }
+        mutate {
+          remove_field => ["stream", "_p", "time", "[kubernetes]",
+        "[event][original]"]
+        }
+      }
+
+      if "_grokparsefailure" in [tags] {
+        mutate {
+          update => { "container_name" => "grokparsefailure" }
+        }
+      }
+
+      if ![container_name] {
+        mutate {
+          add_field => { "container_name" => "unknown-service" }
+        }
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["eck-es-http:9200"]
+        user => "${ES_USER}"
+        password => "${ES_PASSWORD}"
+        ecs_compatibility => "disabled"
+        ssl_enabled => false
+        ilm_enabled => true
+        ilm_rollover_alias => "%{[container_name]}"
+        ilm_pattern => "000001"
+        ilm_policy => "%{[container_name]}-ilm-policy"
+      }
+    }]}"
   ilm_auto_template => true
   ilm_template_mappings => {
     "keyword_fields" => "%{[schema_keywords]}"

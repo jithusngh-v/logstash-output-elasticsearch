@@ -1,3 +1,5 @@
+require 'set'
+
 module LogStash; module Outputs; class ElasticSearch
   module Ilm
 
@@ -68,18 +70,62 @@ module LogStash; module Outputs; class ElasticSearch
       
       alias_key = "#{resolved_alias}:#{resolved_policy}"
       
-      return if @dynamic_ilm_aliases_created.include?(alias_key)
-      
+      return if @dynamic_ilm_aliases_created.include?(alias_key)      
       @dynamic_ilm_aliases_lock.synchronize do
         # Double-check inside the lock
         return if @dynamic_ilm_aliases_created.include?(alias_key)
         
-        # Check if policy exists (for custom policies)
+        # Determine which policy to use
+        policy_to_use = resolved_policy
+        
+        # Ensure policy exists (create if missing for custom policies)
         if resolved_policy && resolved_policy != DEFAULT_POLICY
           unless client.ilm_policy_exists?(resolved_policy)
-            raise LogStash::ConfigurationError, 
-                  "ILM policy '#{resolved_policy}' does not exist. Please create it first using: PUT _ilm/policy/#{resolved_policy}"
-          end
+            if @ilm_auto_create_policy
+              logger.warn("ILM policy '#{resolved_policy}' does not exist. Creating with default configuration.", 
+                         :alias => resolved_alias,
+                         :policy => resolved_policy)
+              begin
+                # Create policy with default configuration
+                client.ilm_policy_put(resolved_policy, policy_payload)
+                logger.info("Successfully created ILM policy", :policy => resolved_policy)
+              rescue => policy_error
+                # If creation fails and fallback is configured, use fallback
+                if @ilm_policy_fallback
+                  logger.warn("Failed to create ILM policy '#{resolved_policy}', using fallback policy '#{@ilm_policy_fallback}'",
+                             :error => policy_error.message,
+                             :alias => resolved_alias)
+                  policy_to_use = @ilm_policy_fallback
+                  # Update alias_key to reflect the actual policy being used
+                  alias_key = "#{resolved_alias}:#{policy_to_use}"
+                  # Check if this combination already exists
+                  return if @dynamic_ilm_aliases_created.include?(alias_key)
+                else
+                  raise LogStash::ConfigurationError, 
+                        "Failed to create ILM policy '#{resolved_policy}': #{policy_error.message}. " +
+                        "Please create it manually using: PUT _ilm/policy/#{resolved_policy}"
+                end
+              end
+            elsif @ilm_policy_fallback
+              # Auto-creation disabled but fallback configured
+              logger.warn("ILM policy '#{resolved_policy}' does not exist and auto-creation is disabled. Using fallback policy '#{@ilm_policy_fallback}'",
+                         :alias => resolved_alias)
+              policy_to_use = @ilm_policy_fallback
+              # Update alias_key to reflect the actual policy being used
+              alias_key = "#{resolved_alias}:#{policy_to_use}"
+              # Check if this combination already exists
+              return if @dynamic_ilm_aliases_created.include?(alias_key)
+            else
+              raise LogStash::ConfigurationError, 
+                    "ILM policy '#{resolved_policy}' does not exist and auto-creation is disabled. " +
+                    "Please create it first using: PUT _ilm/policy/#{resolved_policy} or set ilm_auto_create_policy => true or configure ilm_policy_fallback"
+            end
+          end        
+        end
+        
+        # Create index template if auto-creation is enabled and template doesn't exist
+        if @ilm_auto_create_template
+          create_dynamic_index_template(resolved_alias, policy_to_use || DEFAULT_POLICY)
         end
         
         # Create the rollover alias if it doesn't exist
@@ -92,14 +138,14 @@ module LogStash; module Outputs; class ElasticSearch
               }
             },
             'settings' => {
-              'index.lifecycle.name' => resolved_policy || DEFAULT_POLICY,
+              'index.lifecycle.name' => policy_to_use || DEFAULT_POLICY,
               'index.lifecycle.rollover_alias' => resolved_alias
             }
           }
           
           logger.info("Creating dynamic ILM rollover alias", 
                      :alias => resolved_alias, 
-                     :policy => resolved_policy || DEFAULT_POLICY,
+                     :policy => policy_to_use || DEFAULT_POLICY,
                      :target => target)
           
           client.rollover_alias_put(target, payload)
@@ -187,6 +233,174 @@ module LogStash; module Outputs; class ElasticSearch
     def policy_payload
       policy_path = ::File.expand_path(ILM_POLICY_PATH, ::File.dirname(__FILE__))
       LogStash::Json.load(::IO.read(policy_path))
+    end
+
+    # Create index template for dynamic alias with caching
+    def create_dynamic_index_template(resolved_alias, policy_name)
+      @dynamic_templates_created ||= Set.new
+      
+      # Cache key for template
+      template_name = "logstash-#{resolved_alias}"
+      
+      # Fast path - already created
+      return if @dynamic_templates_created.include?(template_name)
+      
+      # Check if template already exists in Elasticsearch
+      return if template_exists?(template_name)
+      
+      logger.info("Creating dynamic index template", 
+                 :template => template_name,
+                 :alias => resolved_alias,
+                 :policy => policy_name)
+      
+      begin        # Build template payload with your custom settings
+        template_payload = build_template_payload(resolved_alias, policy_name)
+        
+        # Use _index_template endpoint (ES 7.8+) or _template for older versions
+        template_endpoint = use_index_template_api? ? '_index_template' : '_template'
+        
+        # Create the template
+        client.template_put(template_endpoint, template_name, template_payload)
+        
+        # Cache it
+        @dynamic_templates_created.add(template_name)
+        
+        logger.info("Successfully created dynamic index template", :template => template_name)
+      rescue => e
+        logger.warn("Failed to create dynamic index template", 
+                   :template => template_name,
+                   :error => e.message)
+        # Don't fail the event if template creation fails
+        # The index will still be created, just without the template
+      end
+    end
+
+    # Build index template payload matching your Python script requirements
+    def build_template_payload(resolved_alias, policy_name)
+      # Default settings matching your requirements
+      default_settings = {
+        'index' => {
+          'lifecycle' => {
+            'name' => policy_name,
+            'rollover_alias' => resolved_alias
+          },
+          'routing' => {
+            'allocation' => {
+              'include' => {
+                '_tier_preference' => 'data_content'
+              }
+            }
+          },
+          'refresh_interval' => '5s',
+          'number_of_shards' => 1,
+          'number_of_replicas' => 0
+        }
+      }
+      
+      # Deep merge with custom settings if provided
+      merged_settings = deep_merge(default_settings, @ilm_template_settings || {})
+      
+      # Default mappings matching your requirements
+      default_mappings = {
+        'dynamic_templates' => [
+          {
+            'message_field' => {
+              'path_match' => 'message',
+              'match_mapping_type' => 'string',
+              'mapping' => {
+                'type' => 'text',
+                'norms' => false
+              }
+            }
+          },
+          {
+            'string_fields' => {
+              'match' => '*',
+              'match_mapping_type' => 'string',
+              'mapping' => {
+                'type' => 'text',
+                'norms' => false,
+                'fields' => {
+                  'keyword' => {
+                    'type' => 'keyword',
+                    'ignore_above' => 256
+                  }
+                }
+              }
+            }
+          }
+        ],
+        'properties' => {
+          '@timestamp' => { 'type' => 'date' },
+          '@version' => { 'type' => 'keyword' },
+          'geoip' => {
+            'dynamic' => true,
+            'properties' => {
+              'ip' => { 'type' => 'ip' },
+              'latitude' => { 'type' => 'half_float' },
+              'longitude' => { 'type' => 'half_float' },
+              'location' => { 'type' => 'geo_point' }
+            }
+          }
+        }
+      }
+      
+      # Deep merge with custom mappings if provided
+      merged_mappings = deep_merge(default_mappings, @ilm_template_mappings || {})
+      
+      # Return complete template payload
+      {
+        'index_patterns' => ["#{resolved_alias}-*"],
+        'template' => {
+          'settings' => merged_settings,
+          'mappings' => merged_mappings,
+          'aliases' => {}
+        },
+        'priority' => 300,
+        '_meta' => {
+          'description' => 'Dynamically created template for ILM-managed index',
+          'created_by' => 'logstash-output-elasticsearch',
+          'created_at' => Time.now.utc.iso8601
+        }
+      }
+    end    # Check if template exists
+    def template_exists?(template_name)
+      begin
+        template_endpoint = use_index_template_api? ? '_index_template' : '_template'
+        client.template_exists?(template_endpoint, template_name)
+        true
+      rescue ::LogStash::Outputs::ElasticSearch::HttpClient::Pool::NotFoundError
+        false
+      rescue => e
+        logger.warn("Error checking template existence", 
+                   :template => template_name,
+                   :error => e.message)
+        false
+      end
+    end
+
+    # Check if we should use the new _index_template API (ES 7.8+)
+    def use_index_template_api?
+      @use_index_template_api ||= begin
+        maximum_seen_major_version >= 8 || (maximum_seen_major_version == 7 && client.last_es_version >= '7.8.0')
+      end
+    end
+
+    def maximum_seen_major_version
+      @maximum_seen_major_version ||= client.maximum_seen_major_version || 0
+    end
+
+    # Deep merge two hashes
+    def deep_merge(hash1, hash2)
+      result = hash1.dup
+      hash2.each do |key, value|
+        if result[key].is_a?(Hash) && value.is_a?(Hash)
+          result[key] = deep_merge(result[key], value)
+        else
+          result[key] = value
+        end
+      end
+      result
     end
   end
 end; end; end

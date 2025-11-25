@@ -237,11 +237,28 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
   config :ilm_rollover_alias, :validate => :string
 
   # appends “{now/d}-000001” by default for new index creation, subsequent rollover indices will increment based on this pattern i.e. “000002”
-  # {now/d} is date math, and will insert the appropriate value automatically.
-  config :ilm_pattern, :validate => :string, :default => '{now/d}-000001'
-
+  # {now/d} is date math, and will insert the appropriate value automatically.  config :ilm_pattern, :validate => :string, :default => '{now/d}-000001'
   # ILM policy to use, if undefined the default policy will be used.
   config :ilm_policy, :validate => :string, :default => DEFAULT_POLICY
+  # When using dynamic ILM with sprintf patterns, automatically create missing policies
+  # with the default ILM policy configuration. Set to false to require manual policy creation.
+  config :ilm_auto_create_policy, :validate => :boolean, :default => true
+
+  # Fallback policy to use when a custom policy doesn't exist and auto-creation fails or is disabled.
+  # If not specified, errors will be raised for missing policies.
+  config :ilm_policy_fallback, :validate => :string, :default => nil
+
+  # When using dynamic ILM with sprintf patterns, automatically create index templates
+  # for each dynamic alias with proper settings and mappings. Set to false to require manual template creation.
+  config :ilm_auto_create_template, :validate => :boolean, :default => true
+
+  # Custom template settings for auto-created templates. This hash will be deep-merged with default settings.
+  # Example: { "index" => { "number_of_shards" => 1, "number_of_replicas" => 0 } }
+  config :ilm_template_settings, :validate => :hash, :default => {}
+
+  # Custom mappings for auto-created templates. This hash will be deep-merged with default mappings.
+  # Example: { "properties" => { "custom_field" => { "type" => "keyword" } } }
+  config :ilm_template_mappings, :validate => :hash, :default => {}
 
   attr_reader :client
   attr_reader :default_index
