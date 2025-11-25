@@ -163,7 +163,7 @@ module LogStash; module Outputs; class ElasticSearch
     end
 
     def maybe_create_rollover_alias
-      client.rollover_alias_put(rollover_alias_target, rollover_alias_payload) unless client.rollover_alias_exists?(ilm_rollover_alias)
+            client.rollover_alias_put(rollover_alias_target, rollover_alias_payload) unless client.rollover_alias_exists?(ilm_rollover_alias)
     end
 
     def rollover_alias_target
@@ -176,6 +176,10 @@ module LogStash; module Outputs; class ElasticSearch
               ilm_rollover_alias =>{
                   'is_write_index' =>  true
               }
+          },
+          'settings' => {
+              'index.lifecycle.name' => ilm_policy,
+              'index.lifecycle.rollover_alias' => ilm_rollover_alias
           }
       }
     end
