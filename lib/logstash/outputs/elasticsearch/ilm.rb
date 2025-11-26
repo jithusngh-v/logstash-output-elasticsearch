@@ -77,12 +77,11 @@ module LogStash; module Outputs; class ElasticSearch
         
         # Determine which policy to use
         policy_to_use = resolved_policy
-        
-        # Ensure policy exists (create if missing for custom policies)
+          # STEP 1: Ensure policy exists (create if missing for custom policies)
         if resolved_policy && resolved_policy != DEFAULT_POLICY
           unless client.ilm_policy_exists?(resolved_policy)
             if @ilm_auto_create_policy
-              logger.warn("ILM policy '#{resolved_policy}' does not exist. Creating with default configuration.", 
+              logger.info("ILM policy '#{resolved_policy}' does not exist. Creating with default configuration.", 
                          :alias => resolved_alias,
                          :policy => resolved_policy)
               begin
@@ -120,9 +119,12 @@ module LogStash; module Outputs; class ElasticSearch
                     "ILM policy '#{resolved_policy}' does not exist and auto-creation is disabled. " +
                     "Please create it first using: PUT _ilm/policy/#{resolved_policy} or set ilm_auto_create_policy => true or configure ilm_policy_fallback"
             end
+          else
+            logger.debug("ILM policy already exists", :policy => resolved_policy)
           end        
         end
-          # Create index template if auto-creation is enabled and template doesn't exist
+        
+        # STEP 2: Create index template if auto-creation is enabled
         if @ilm_auto_create_template
           logger.info("Attempting to create dynamic index template", 
                      :alias => resolved_alias,
@@ -133,7 +135,7 @@ module LogStash; module Outputs; class ElasticSearch
           logger.debug("Template auto-creation is disabled", :auto_create_template => @ilm_auto_create_template)
         end
         
-        # Create the rollover alias if it doesn't exist
+        # STEP 3: Create the rollover alias if it doesn't exist
         unless client.rollover_alias_exists?(resolved_alias)
           target = "<#{resolved_alias}-#{ilm_pattern}>"
           payload = {
@@ -314,23 +316,52 @@ module LogStash; module Outputs; class ElasticSearch
                  :template => template_name,
                  :alias => resolved_alias,
                  :policy => policy_name)
-      
-      begin        # Build template payload with your custom settings
+        begin
+        # Build template payload with your custom settings
         template_payload = build_template_payload(resolved_alias, policy_name)
         
         # Use _index_template endpoint (ES 7.8+) or _template for older versions
         template_endpoint = use_index_template_api? ? '_index_template' : '_template'
+        
+        # Log the payload for debugging (only first time)
+        logger.debug("Template payload", 
+                    :template => template_name,
+                    :index_patterns => template_payload['index_patterns'],
+                    :policy => policy_name)
         
         # Create the template
         client.template_put(template_endpoint, template_name, template_payload)
         
         # Cache it
         @dynamic_templates_created.add(template_name)
-          logger.info("Successfully created dynamic index template", :template => template_name)
+        logger.info("Successfully created dynamic index template", :template => template_name)
+      rescue ::LogStash::Outputs::ElasticSearch::HttpClient::Pool::BadResponseCodeError => e
+        # Extract detailed error from Elasticsearch response
+        error_details = e.message
+        begin
+          # Try to parse the response body for more details
+          if e.response_body
+            error_body = LogStash::Json.load(e.response_body)
+            error_details = error_body.dig('error', 'reason') || error_body.dig('error', 'root_cause', 0, 'reason') || e.message
+          end
+        rescue => parse_error
+          # If we can't parse, use the original message
+        end
+        
+        logger.error("Failed to create dynamic index template",
+                   :template => template_name,
+                   :alias => resolved_alias,
+                   :policy => policy_name,
+                   :error => error_details,
+                   :response_code => e.response_code,
+                   :backtrace => e.backtrace.first(3))
+        # Don't fail the event if template creation fails
+        # The index will still be created, just without the template
       rescue => e
         logger.error("Failed to create dynamic index template",
                    :template => template_name,
                    :error => e.message,
+                   :error_class => e.class.name,
                    :backtrace => e.backtrace.first(5))
         # Don't fail the event if template creation fails
         # The index will still be created, just without the template
