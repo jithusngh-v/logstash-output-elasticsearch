@@ -227,13 +227,14 @@ module LogStash; module Outputs; class ElasticSearch
               ilm_rollover_alias =>{
                   'is_write_index' =>  true
               }
-          },
-          'settings' => {
+          },          'settings' => {
               'index.lifecycle.name' => ilm_policy,
               'index.lifecycle.rollover_alias' => ilm_rollover_alias
           }
       }
-    end      def policy_payload
+    end
+    
+    def policy_payload
       @policy_payload_cache ||= load_policy_from_file
     end
 
