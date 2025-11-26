@@ -68,32 +68,35 @@ spec:
   template:
     spec:
       containers:
-      - name: logstash
-        env:
-        - name: ILM_POLICY_PATH
-          value: "/config/ilm-policy.json"
-        volumeMounts:
-        - name: ilm-policy
-          mountPath: /config
+        - name: logstash
+          env:
+            - name: ILM_POLICY_PATH
+              value: "/config/ilm-policy.json"
+          volumeMounts:
+            - name: ilm-policy
+              mountPath: /config
       volumes:
-      - name: ilm-policy
-        configMap:
-          name: ilm-policy-config
+        - name: ilm-policy
+          configMap:
+            name: ilm-policy-config
 ```
 
 ## Example Policies
 
 ### Development (`development-ilm-policy.json`)
+
 - **Rollover**: Every 1 day
 - **Delete**: After 1 day
 - **Use case**: Short retention for development/testing
 
 ### Staging (`staging-ilm-policy.json`)
+
 - **Rollover**: Every 3 days
 - **Delete**: After 7 days
 - **Use case**: Moderate retention for staging environments
 
 ### Production (`production-ilm-policy.json`)
+
 - **Rollover**: Every 7 days or 50GB
 - **Warm phase**: After 7 days (shrink to 1 shard, priority 50)
 - **Delete**: After 30 days
@@ -134,6 +137,7 @@ The policy file must be valid JSON with the following structure:
 ## Fallback Behavior
 
 If the custom policy path:
+
 1. Is not set in environment variables
 2. Points to a non-existent file
 3. Contains invalid JSON
@@ -184,6 +188,7 @@ curl -X PUT "localhost:9200/_ilm/policy/test-policy?pretty" \
 ### Policy Not Loading
 
 Check Logstash logs for error messages:
+
 ```bash
 grep "ILM policy" /var/log/logstash/logstash-plain.log
 ```
@@ -201,6 +206,7 @@ kubectl exec <pod-name> -- env | grep ILM_POLICY_PATH
 ### File Permissions
 
 Ensure Logstash can read the policy file:
+
 ```bash
 ls -la /path/to/policy.json
 # Should be readable by the logstash user

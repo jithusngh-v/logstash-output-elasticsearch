@@ -2,10 +2,10 @@
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `ILM_POLICY_PATH` | Path to custom ILM policy JSON file (primary) |
-| `LOGSTASH_ILM_POLICY_PATH` | Alternative name for the same purpose |
+| Variable                   | Description                                   |
+| -------------------------- | --------------------------------------------- |
+| `ILM_POLICY_PATH`          | Path to custom ILM policy JSON file (primary) |
+| `LOGSTASH_ILM_POLICY_PATH` | Alternative name for the same purpose         |
 
 ## Quick Start
 
@@ -18,14 +18,14 @@
       "hot": {
         "min_age": "0ms",
         "actions": {
-          "rollover": {"max_age": "1d"},
-          "set_priority": {"priority": 100}
+          "rollover": { "max_age": "1d" },
+          "set_priority": { "priority": 100 }
         }
       },
       "delete": {
         "min_age": "1d",
         "actions": {
-          "delete": {"delete_searchable_snapshot": true}
+          "delete": { "delete_searchable_snapshot": true }
         }
       }
     }
@@ -71,25 +71,25 @@ services:
 
 ```yaml
 env:
-- name: ILM_POLICY_PATH
-  value: "/config/ilm-policy.json"
+  - name: ILM_POLICY_PATH
+    value: "/config/ilm-policy.json"
 volumeMounts:
-- name: ilm-policy
-  mountPath: /config
+  - name: ilm-policy
+    mountPath: /config
 volumes:
-- name: ilm-policy
-  configMap:
-    name: ilm-policy-configmap
+  - name: ilm-policy
+    configMap:
+      name: ilm-policy-configmap
 ```
 
 ## Behavior
 
-| Scenario | Result |
-|----------|--------|
-| Env var set + file exists | ✅ Uses custom policy |
+| Scenario                   | Result                   |
+| -------------------------- | ------------------------ |
+| Env var set + file exists  | ✅ Uses custom policy    |
 | Env var set + file missing | ⚠️ Falls back to default |
 | Env var set + invalid JSON | ⚠️ Falls back to default |
-| Env var not set | ✅ Uses default policy |
+| Env var not set            | ✅ Uses default policy   |
 
 ## Log Check
 
@@ -115,21 +115,27 @@ GET your-alias-000001/_settings
 ## Common Issues
 
 ### File Not Found
+
 ```
 [ERROR] Custom ILM policy path does not exist, falling back to default
 ```
+
 **Fix**: Check file path and permissions
 
 ### Invalid JSON
+
 ```
 [ERROR] Failed to load custom ILM policy, falling back to default
 ```
+
 **Fix**: Validate JSON syntax with `jq`:
+
 ```bash
 cat policy.json | jq .
 ```
 
 ### Policy Not Applied
+
 ```bash
 # Check environment variable is set
 env | grep ILM_POLICY_PATH
@@ -141,6 +147,7 @@ ls -la /path/to/policy.json
 ## Examples
 
 See `lib/logstash/outputs/elasticsearch/examples/` for:
+
 - `development-ilm-policy.json` (1d retention)
 - `staging-ilm-policy.json` (7d retention)
 - `production-ilm-policy.json` (30d retention)
@@ -148,6 +155,7 @@ See `lib/logstash/outputs/elasticsearch/examples/` for:
 ## Default Policy Location
 
 If no custom policy is specified:
+
 ```
 lib/logstash/outputs/elasticsearch/default-ilm-policy.json
 ```

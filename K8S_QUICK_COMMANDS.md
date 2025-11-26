@@ -31,12 +31,14 @@ kubectl edit statefulset logstash-logstash-test -n elastic-search
 **Add these sections:**
 
 Under `spec.template.spec.containers[0].env`:
+
 ```yaml
 - name: ILM_POLICY_PATH
   value: "/usr/share/logstash/config/ilm-policy.json"
 ```
 
 Under `spec.template.spec.containers[0].volumeMounts`:
+
 ```yaml
 - mountPath: /usr/share/logstash/config/ilm-policy.json
   name: ilm-policy
@@ -45,6 +47,7 @@ Under `spec.template.spec.containers[0].volumeMounts`:
 ```
 
 Under `spec.template.spec.volumes`:
+
 ```yaml
 - name: ilm-policy
   configMap:

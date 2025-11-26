@@ -425,12 +425,13 @@ module LogStash; module Outputs; class ElasticSearch
           'created_at' => Time.now.utc.iso8601
         }
       }
-    end    # Check if template exists
+    end    
+    # Check if template exists
     def template_exists?(template_name)
       begin
         template_endpoint = use_index_template_api? ? '_index_template' : '_template'
+        # Return the actual result from template_exists?
         client.template_exists?(template_endpoint, template_name)
-        true
       rescue ::LogStash::Outputs::ElasticSearch::HttpClient::Pool::NotFoundError
         false
       rescue => e

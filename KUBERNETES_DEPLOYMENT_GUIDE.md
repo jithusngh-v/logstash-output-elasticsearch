@@ -212,18 +212,18 @@ output {
     password => "${ES_PASSWORD}"
     ecs_compatibility => "disabled"
     ssl_enabled => false
-    
+
     # Dynamic ILM Configuration
     ilm_enabled => true
     ilm_rollover_alias => "%{[container_name]}"
     ilm_pattern => "000001"
     ilm_policy => "%{[container_name]}-ilm-policy"
-    
+
     # Auto-create with safety net
     ilm_auto_create_policy => true
     ilm_policy_fallback => "common-ilm-policy"
     ilm_auto_create_template => true
-    
+
     # Optional: Custom template settings
     ilm_template_settings => {
       "index" => {
@@ -315,6 +315,7 @@ kubectl logs -f logstash-logstash-test-0 -n elastic-search -c logstash | grep -i
 ```
 
 You should see:
+
 ```
 [INFO] Loading custom ILM policy from environment variable {:path=>"/usr/share/logstash/config/ilm-policy.json", :env_var=>"ILM_POLICY_PATH"}
 [INFO] Successfully loaded custom ILM policy {:path=>"/usr/share/logstash/config/ilm-policy.json"}
@@ -381,6 +382,7 @@ k8s/
 ```
 
 **base/kustomization.yaml:**
+
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -390,6 +392,7 @@ resources:
 ```
 
 **overlays/development/kustomization.yaml:**
+
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -402,6 +405,7 @@ namespace: elastic-search-dev
 ```
 
 Deploy:
+
 ```bash
 kubectl apply -k overlays/development/
 kubectl apply -k overlays/staging/
@@ -413,11 +417,13 @@ kubectl apply -k overlays/production/
 ### Policy Not Loading
 
 **Check logs:**
+
 ```bash
 kubectl logs logstash-logstash-test-0 -n elastic-search -c logstash | grep -A5 -B5 "ILM policy"
 ```
 
 **Common issues:**
+
 1. File not mounted: Check volume mounts
 2. Wrong path: Verify `ILM_POLICY_PATH` matches mount path
 3. Invalid JSON: Validate with `kubectl exec ... -- cat /usr/share/logstash/config/ilm-policy.json | jq .`

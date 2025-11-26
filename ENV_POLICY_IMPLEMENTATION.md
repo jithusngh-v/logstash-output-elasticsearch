@@ -9,10 +9,12 @@ Successfully implemented environment variable support for custom ILM policy conf
 ### 1. Modified `lib/logstash/outputs/elasticsearch/ilm.rb`
 
 **Method: `policy_payload`**
+
 - Changed from hardcoded policy to loading from file
 - Added caching with `@policy_payload_cache`
 
 **New Method: `load_policy_from_file`** (private)
+
 - Checks for environment variables: `ILM_POLICY_PATH` or `LOGSTASH_ILM_POLICY_PATH`
 - Loads custom policy if environment variable is set and file exists
 - Falls back to `default-ilm-policy.json` if custom policy fails or is not specified
@@ -21,6 +23,7 @@ Successfully implemented environment variable support for custom ILM policy conf
 ### 2. Updated `lib/logstash/outputs/elasticsearch/default-ilm-policy.json`
 
 Changed from:
+
 ```json
 {
   "policy": {
@@ -39,6 +42,7 @@ Changed from:
 ```
 
 To your requirements:
+
 ```json
 {
   "policy": {
@@ -81,7 +85,7 @@ To your requirements:
 ### Docker Compose
 
 ```yaml
-version: '3.8'
+version: "3.8"
 services:
   logstash-dev:
     image: your-logstash:latest
@@ -109,18 +113,18 @@ spec:
   template:
     spec:
       containers:
-      - name: logstash
-        image: your-logstash:latest
-        env:
-        - name: ILM_POLICY_PATH
-          value: "/config/ilm-policy.json"
-        volumeMounts:
-        - name: ilm-policy
-          mountPath: /config
+        - name: logstash
+          image: your-logstash:latest
+          env:
+            - name: ILM_POLICY_PATH
+              value: "/config/ilm-policy.json"
+          volumeMounts:
+            - name: ilm-policy
+              mountPath: /config
       volumes:
-      - name: ilm-policy
-        configMap:
-          name: ilm-policy-config-dev  # or ilm-policy-config-prod
+        - name: ilm-policy
+          configMap:
+            name: ilm-policy-config-dev # or ilm-policy-config-prod
 ```
 
 ### Docker Run
@@ -191,23 +195,27 @@ YES     NO
 ## Log Messages
 
 ### Success (Custom Policy)
+
 ```
 [INFO] Loading custom ILM policy from environment variable {:path=>"/config/prod-policy.json", :env_var=>"ILM_POLICY_PATH"}
 [INFO] Successfully loaded custom ILM policy {:path=>"/config/prod-policy.json"}
 ```
 
 ### Success (Default Policy)
+
 ```
 [INFO] Loading default ILM policy {:path=>"/usr/share/logstash/.../default-ilm-policy.json"}
 ```
 
 ### Error (File Not Found)
+
 ```
 [ERROR] Custom ILM policy path specified in environment variable does not exist, falling back to default {:path=>"/config/missing.json", :env_var=>"ILM_POLICY_PATH"}
 [INFO] Loading default ILM policy {:path=>"/usr/share/logstash/.../default-ilm-policy.json"}
 ```
 
 ### Error (Invalid JSON)
+
 ```
 [ERROR] Failed to load custom ILM policy from environment variable, falling back to default {:path=>"/config/invalid.json", :error=>"unexpected token at ...", :backtrace=>[...]}
 [INFO] Loading default ILM policy {:path=>"/usr/share/logstash/.../default-ilm-policy.json"}
@@ -218,6 +226,7 @@ YES     NO
 ### Test with Custom Policy
 
 1. Create your policy file:
+
 ```bash
 cat > /tmp/test-policy.json << 'EOF'
 {
@@ -243,6 +252,7 @@ EOF
 ```
 
 2. Run Logstash:
+
 ```bash
 ILM_POLICY_PATH=/tmp/test-policy.json /usr/share/logstash/bin/logstash -f your-config.conf
 ```
@@ -304,6 +314,7 @@ GET _ilm/policy/<your-alias>-ilm-policy
 ## Support
 
 For troubleshooting, check:
+
 1. Logstash logs for policy loading messages
 2. File permissions on custom policy files
 3. JSON syntax validation

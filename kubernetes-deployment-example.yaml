@@ -80,86 +80,86 @@ spec:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
-            - matchExpressions:
-              - key: logstash
-                operator: In
-                values:
-                - elk
+              - matchExpressions:
+                  - key: logstash
+                    operator: In
+                    values:
+                      - elk
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchExpressions:
-              - key: app
-                operator: In
-                values:
-                - logstash-logstash
-            topologyKey: kubernetes.io/hostname
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - logstash-logstash
+              topologyKey: kubernetes.io/hostname
       containers:
-      - name: logstash
-        image: jithsungh/logstash-better:8.4.0-beta
-        imagePullPolicy: Always
-        env:
-        - name: LS_JAVA_OPTS
-          value: -Xmx7g -Xms6g
-        - name: PIPELINE_WORKERS
-          value: "8"
-        - name: PIPELINE_BATCH_SIZE
-          value: "2048"
-        - name: ES_USER
-          valueFrom:
-            secretKeyRef:
-              key: ES_USER
-              name: elasticsearch-creds
-        - name: ES_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              key: ES_PASSWORD
-              name: elasticsearch-creds
-        # ⭐ NEW: ILM Policy Path Environment Variable
-        - name: ILM_POLICY_PATH
-          value: "/usr/share/logstash/config/ilm-policy.json"
-        ports:
-        - containerPort: 9600
-          name: http
-          protocol: TCP
-        resources:
-          requests:
-            cpu: "2"
-            memory: 7Gi
-        securityContext:
-          capabilities:
-            drop:
-            - ALL
-          runAsNonRoot: true
-          runAsUser: 1000
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        volumeMounts:
-        - mountPath: /usr/share/logstash/pipeline/logstash.conf
-          name: logstashpipeline
-          subPath: logstash.conf
-        # ⭐ NEW: Mount ILM Policy ConfigMap
-        - mountPath: /usr/share/logstash/config/ilm-policy.json
-          name: ilm-policy
-          subPath: ilm-policy.json
-          readOnly: true
-      
-      - name: logstash-exporter
-        image: kuskoman/logstash-exporter:v1.9.1
-        imagePullPolicy: Always
-        env:
-        - name: LOGSTASH_URL
-          value: http://localhost:9600
-        - name: PORT
-          value: "9198"
-        ports:
-        - containerPort: 9198
-          name: metrics-port
-          protocol: TCP
-        resources: {}
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-      
+        - name: logstash
+          image: jithsungh/logstash-better:8.4.0-beta
+          imagePullPolicy: Always
+          env:
+            - name: LS_JAVA_OPTS
+              value: -Xmx7g -Xms6g
+            - name: PIPELINE_WORKERS
+              value: "8"
+            - name: PIPELINE_BATCH_SIZE
+              value: "2048"
+            - name: ES_USER
+              valueFrom:
+                secretKeyRef:
+                  key: ES_USER
+                  name: elasticsearch-creds
+            - name: ES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: ES_PASSWORD
+                  name: elasticsearch-creds
+            # ⭐ NEW: ILM Policy Path Environment Variable
+            - name: ILM_POLICY_PATH
+              value: "/usr/share/logstash/config/ilm-policy.json"
+          ports:
+            - containerPort: 9600
+              name: http
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "2"
+              memory: 7Gi
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1000
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /usr/share/logstash/pipeline/logstash.conf
+              name: logstashpipeline
+              subPath: logstash.conf
+            # ⭐ NEW: Mount ILM Policy ConfigMap
+            - mountPath: /usr/share/logstash/config/ilm-policy.json
+              name: ilm-policy
+              subPath: ilm-policy.json
+              readOnly: true
+
+        - name: logstash-exporter
+          image: kuskoman/logstash-exporter:v1.9.1
+          imagePullPolicy: Always
+          env:
+            - name: LOGSTASH_URL
+              value: http://localhost:9600
+            - name: PORT
+              value: "9198"
+          ports:
+            - containerPort: 9198
+              name: metrics-port
+              protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+
       dnsPolicy: ClusterFirst
       restartPolicy: Always
       schedulerName: default-scheduler
@@ -168,14 +168,14 @@ spec:
         runAsUser: 1000
       terminationGracePeriodSeconds: 120
       volumes:
-      - name: logstashpipeline
-        configMap:
-          defaultMode: 420
-          name: logstash-pipeline-test
-      # ⭐ NEW: ILM Policy Volume
-      - name: ilm-policy
-        configMap:
-          defaultMode: 420
-          name: logstash-ilm-policy
+        - name: logstashpipeline
+          configMap:
+            defaultMode: 420
+            name: logstash-pipeline-test
+        # ⭐ NEW: ILM Policy Volume
+        - name: ilm-policy
+          configMap:
+            defaultMode: 420
+            name: logstash-ilm-policy
   updateStrategy:
     type: RollingUpdate
