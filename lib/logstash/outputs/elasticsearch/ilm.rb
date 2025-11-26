@@ -122,10 +122,15 @@ module LogStash; module Outputs; class ElasticSearch
             end
           end        
         end
-        
-        # Create index template if auto-creation is enabled and template doesn't exist
+          # Create index template if auto-creation is enabled and template doesn't exist
         if @ilm_auto_create_template
+          logger.info("Attempting to create dynamic index template", 
+                     :alias => resolved_alias,
+                     :policy => policy_to_use || DEFAULT_POLICY,
+                     :auto_create_enabled => @ilm_auto_create_template)
           create_dynamic_index_template(resolved_alias, policy_to_use || DEFAULT_POLICY)
+        else
+          logger.debug("Template auto-creation is disabled", :auto_create_template => @ilm_auto_create_template)
         end
         
         # Create the rollover alias if it doesn't exist
@@ -228,27 +233,83 @@ module LogStash; module Outputs; class ElasticSearch
               'index.lifecycle.rollover_alias' => ilm_rollover_alias
           }
       }
+    end      def policy_payload
+      @policy_payload_cache ||= load_policy_from_file
     end
 
-    def policy_payload
-      policy_path = ::File.expand_path(ILM_POLICY_PATH, ::File.dirname(__FILE__))
-      LogStash::Json.load(::IO.read(policy_path))
+    private
+
+    def load_policy_from_file
+      # Check for custom ILM policy path in environment variable
+      custom_policy_path = ENV['ILM_POLICY_PATH'] || ENV['LOGSTASH_ILM_POLICY_PATH']
+      
+      if custom_policy_path && !custom_policy_path.empty?
+        # Custom policy path provided via environment variable
+        if ::File.exist?(custom_policy_path)
+          begin
+            logger.info("Loading custom ILM policy from environment variable", 
+                       :path => custom_policy_path,
+                       :env_var => custom_policy_path == ENV['ILM_POLICY_PATH'] ? 'ILM_POLICY_PATH' : 'LOGSTASH_ILM_POLICY_PATH')
+            policy_content = ::IO.read(custom_policy_path)
+            policy = LogStash::Json.load(policy_content)
+            logger.info("Successfully loaded custom ILM policy", :path => custom_policy_path)
+            return policy
+          rescue => e
+            logger.error("Failed to load custom ILM policy from environment variable, falling back to default", 
+                        :path => custom_policy_path,
+                        :error => e.message,
+                        :backtrace => e.backtrace.first(3))
+            # Fall through to default policy
+          end
+        else
+          logger.error("Custom ILM policy path specified in environment variable does not exist, falling back to default", 
+                      :path => custom_policy_path,
+                      :env_var => custom_policy_path == ENV['ILM_POLICY_PATH'] ? 'ILM_POLICY_PATH' : 'LOGSTASH_ILM_POLICY_PATH')
+          # Fall through to default policy
+        end
+      end
+      
+      # Load default policy
+      default_policy_path = ::File.expand_path(ILM_POLICY_PATH, ::File.dirname(__FILE__))
+      begin
+        logger.info("Loading default ILM policy", :path => default_policy_path)
+        policy_content = ::IO.read(default_policy_path)
+        policy = LogStash::Json.load(policy_content)
+        logger.debug("Successfully loaded default ILM policy")
+        return policy
+      rescue => e
+        logger.error("Failed to load default ILM policy file", 
+                    :path => default_policy_path,
+                    :error => e.message)
+        raise LogStash::ConfigurationError, 
+              "Cannot load ILM policy: #{e.message}. " +
+              "Please ensure the default policy file exists at #{default_policy_path} " +
+              "or provide a valid custom policy path via ILM_POLICY_PATH or LOGSTASH_ILM_POLICY_PATH environment variable."
+      end
     end
+
+    public
 
     # Create index template for dynamic alias with caching
     def create_dynamic_index_template(resolved_alias, policy_name)
       @dynamic_templates_created ||= Set.new
-      
-      # Cache key for template
+        # Cache key for template
       template_name = "logstash-#{resolved_alias}"
       
       # Fast path - already created
-      return if @dynamic_templates_created.include?(template_name)
+      if @dynamic_templates_created.include?(template_name)
+        logger.debug("Template already created in this session", :template => template_name)
+        return
+      end
       
       # Check if template already exists in Elasticsearch
-      return if template_exists?(template_name)
+      if template_exists?(template_name)
+        logger.info("Template already exists in Elasticsearch, skipping creation", :template => template_name)
+        @dynamic_templates_created.add(template_name)
+        return
+      end
       
-      logger.info("Creating dynamic index template", 
+      logger.info("Creating dynamic index template",
                  :template => template_name,
                  :alias => resolved_alias,
                  :policy => policy_name)
@@ -264,12 +325,12 @@ module LogStash; module Outputs; class ElasticSearch
         
         # Cache it
         @dynamic_templates_created.add(template_name)
-        
-        logger.info("Successfully created dynamic index template", :template => template_name)
+          logger.info("Successfully created dynamic index template", :template => template_name)
       rescue => e
-        logger.warn("Failed to create dynamic index template", 
+        logger.error("Failed to create dynamic index template",
                    :template => template_name,
-                   :error => e.message)
+                   :error => e.message,
+                   :backtrace => e.backtrace.first(5))
         # Don't fail the event if template creation fails
         # The index will still be created, just without the template
       end
