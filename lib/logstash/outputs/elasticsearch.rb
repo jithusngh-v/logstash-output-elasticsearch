@@ -237,7 +237,8 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
   config :ilm_rollover_alias, :validate => :string
 
   # appends “{now/d}-000001” by default for new index creation, subsequent rollover indices will increment based on this pattern i.e. “000002”
-  # {now/d} is date math, and will insert the appropriate value automatically.  config :ilm_pattern, :validate => :string, :default => '{now/d}-000001'
+  # {now/d} is date math, and will insert the appropriate value automatically.
+  config :ilm_pattern, :validate => :string, :default => '{now/d}-000001'
   # ILM policy to use, if undefined the default policy will be used.
   config :ilm_policy, :validate => :string, :default => DEFAULT_POLICY
   # When using dynamic ILM with sprintf patterns, automatically create missing policies
