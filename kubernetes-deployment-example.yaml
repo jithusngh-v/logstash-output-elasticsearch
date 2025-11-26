@@ -1,0 +1,181 @@
+---
+# ConfigMap for ILM Policy
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-ilm-policy
+  namespace: elastic-search
+data:
+  ilm-policy.json: |
+    {
+      "policy": {
+        "phases": {
+          "hot": {
+            "min_age": "0ms",
+            "actions": {
+              "rollover": {
+                "max_age": "1d"
+              },
+              "set_priority": {
+                "priority": 100
+              }
+            }
+          },
+          "delete": {
+            "min_age": "1d",
+            "actions": {
+              "delete": {
+                "delete_searchable_snapshot": true
+              }
+            }
+          }
+        }
+      }
+    }
+
+---
+# StatefulSet with ILM Policy ConfigMap mounted
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: logstash-logstash-test
+  namespace: elastic-search
+  labels:
+    app: logstash-logstash
+    app.kubernetes.io/managed-by: Helm
+    chart: logstash
+    heritage: Helm
+    release: logstash
+  annotations:
+    meta.helm.sh/release-name: logstash
+    meta.helm.sh/release-namespace: elastic-search
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  podManagementPolicy: Parallel
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: logstash-logstash
+      release: logstash
+  serviceName: logstash-logstash-headless
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "2025-11-26T11:51:57+05:30"
+        pipelinechecksum: f3610384015844f8854136fb692b240e24e784293b110108beb734821b98aa6
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9198"
+        prometheus.io/scrape: "true"
+      labels:
+        app: logstash-logstash
+        chart: logstash
+        heritage: Helm
+        release: logstash
+      name: logstash-logstash-test
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: logstash
+                operator: In
+                values:
+                - elk
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - logstash-logstash
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: logstash
+        image: jithsungh/logstash-better:8.4.0-beta
+        imagePullPolicy: Always
+        env:
+        - name: LS_JAVA_OPTS
+          value: -Xmx7g -Xms6g
+        - name: PIPELINE_WORKERS
+          value: "8"
+        - name: PIPELINE_BATCH_SIZE
+          value: "2048"
+        - name: ES_USER
+          valueFrom:
+            secretKeyRef:
+              key: ES_USER
+              name: elasticsearch-creds
+        - name: ES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: ES_PASSWORD
+              name: elasticsearch-creds
+        # ⭐ NEW: ILM Policy Path Environment Variable
+        - name: ILM_POLICY_PATH
+          value: "/usr/share/logstash/config/ilm-policy.json"
+        ports:
+        - containerPort: 9600
+          name: http
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "2"
+            memory: 7Gi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /usr/share/logstash/pipeline/logstash.conf
+          name: logstashpipeline
+          subPath: logstash.conf
+        # ⭐ NEW: Mount ILM Policy ConfigMap
+        - mountPath: /usr/share/logstash/config/ilm-policy.json
+          name: ilm-policy
+          subPath: ilm-policy.json
+          readOnly: true
+      
+      - name: logstash-exporter
+        image: kuskoman/logstash-exporter:v1.9.1
+        imagePullPolicy: Always
+        env:
+        - name: LOGSTASH_URL
+          value: http://localhost:9600
+        - name: PORT
+          value: "9198"
+        ports:
+        - containerPort: 9198
+          name: metrics-port
+          protocol: TCP
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+      terminationGracePeriodSeconds: 120
+      volumes:
+      - name: logstashpipeline
+        configMap:
+          defaultMode: 420
+          name: logstash-pipeline-test
+      # ⭐ NEW: ILM Policy Volume
+      - name: ilm-policy
+        configMap:
+          defaultMode: 420
+          name: logstash-ilm-policy
+  updateStrategy:
+    type: RollingUpdate
