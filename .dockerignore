@@ -1,0 +1,35 @@
+# .dockerignore for logstash-output-elasticsearch
+.git
+.github
+.ci
+*.md
+*.txt
+CHANGELOG.md
+README.md
+CONTRIBUTORS
+LICENSE
+NOTICE.TXT
+
+# Exclude examples
+examples/
+
+# Exclude test files
+spec/
+test/
+
+# Exclude build artifacts
+*.gem
+.bundle
+vendor/bundle
+Gemfile.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

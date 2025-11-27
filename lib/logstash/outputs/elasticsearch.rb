@@ -450,6 +450,19 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
 
   # Convert the event into a 3-tuple of action, params and event hash
   def event_action_tuple(event)
+    # Ensure dynamic ILM alias exists before creating the tuple
+    if ilm_in_use? && ilm_has_sprintf?
+      begin
+        ensure_dynamic_ilm_alias(event)
+      rescue => e
+        @logger.error("Failed to ensure dynamic ILM alias", 
+                     :error => e.message,
+                     :event => event.to_hash_with_metadata,
+                     :backtrace => e.backtrace.first(10))
+        raise EventMappingError, "Failed to ensure dynamic ILM alias: #{e.message}"
+      end
+    end
+    
     params = common_event_params(event)
     params[:_type] = get_event_type(event) if use_event_type?(nil)
 
@@ -566,6 +579,13 @@ class LogStash::Outputs::ElasticSearch < LogStash::Outputs::Base
   private :resolve_document_id
 
   def resolve_index!(event, event_index)
+    # If using dynamic ILM with sprintf, use the resolved rollover alias as the index
+    if ilm_in_use? && ilm_has_sprintf?
+      resolved_alias = resolve_ilm_rollover_alias(event)
+      raise IndexInterpolationError, resolved_alias if resolved_alias.match(/%{.*?}/) && dlq_on_failed_indexname_interpolation
+      return resolved_alias
+    end
+    
     sprintf_index = @event_target.call(event)
     raise IndexInterpolationError, sprintf_index if sprintf_index.match(/%{.*?}/) && dlq_on_failed_indexname_interpolation
     # if it's not a data stream, sprintf_index is the @index with resolved placeholders.
