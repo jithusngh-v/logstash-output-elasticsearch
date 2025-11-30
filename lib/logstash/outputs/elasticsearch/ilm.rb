@@ -54,25 +54,35 @@ module LogStash; module Outputs; class ElasticSearch
       end
       
       resolved
-    end
-
+    end    
+    
     # Ensure dynamic ILM rollover alias exists for a specific event
     # This is called when using sprintf patterns in ilm_rollover_alias
     def ensure_dynamic_ilm_alias(event)
       return unless ilm_in_use? && ilm_has_sprintf?
       
+      # Initialize cache structures first (cheap)
+      @dynamic_ilm_aliases_lock ||= Mutex.new
+      @dynamic_ilm_aliases_created ||= Set.new
+      @dynamic_ilm_field_cache ||= {}
+      
+      # OPTIMIZATION: Build cache key from raw field values BEFORE sprintf
+      # This allows fast cache lookup without expensive string interpolation
+      raw_cache_key = build_raw_cache_key(event)
+      
+      # Fast path: Check if we've already processed this exact field combination
+      return if @dynamic_ilm_field_cache[raw_cache_key]
+      
+      # Cache miss - now do the expensive sprintf operations
       resolved_alias = resolve_ilm_rollover_alias(event)
       resolved_policy = resolve_ilm_policy(event) if @ilm_policy
       
-      # Thread-safe check and create
-      @dynamic_ilm_aliases_lock ||= Mutex.new
-      @dynamic_ilm_aliases_created ||= Set.new
-      
       alias_key = "#{resolved_alias}:#{resolved_policy}"
-      
-      return if @dynamic_ilm_aliases_created.include?(alias_key)      
+        # Check resolved cache (in case different field values resolve to same alias)
+      return if @dynamic_ilm_aliases_created.include?(alias_key)
       @dynamic_ilm_aliases_lock.synchronize do
-        # Double-check inside the lock
+        # Double-check inside the lock (both caches)
+        return if @dynamic_ilm_field_cache[raw_cache_key]
         return if @dynamic_ilm_aliases_created.include?(alias_key)
         
         # Determine which policy to use
@@ -154,11 +164,12 @@ module LogStash; module Outputs; class ElasticSearch
                      :alias => resolved_alias, 
                      :policy => policy_to_use || DEFAULT_POLICY,
                      :target => target)
-          
-          client.rollover_alias_put(target, payload)
+            client.rollover_alias_put(target, payload)
         end
         
+        # Add to both caches
         @dynamic_ilm_aliases_created.add(alias_key)
+        @dynamic_ilm_field_cache[raw_cache_key] = true
       end
     rescue => e
       logger.error("Failed to create dynamic ILM alias", 
@@ -291,27 +302,151 @@ module LogStash; module Outputs; class ElasticSearch
       end
     end
 
-    public
+    private
 
+    # Build a fast cache key from raw field values (before sprintf)
+    # This allows cache lookup without expensive string interpolation
+    def build_raw_cache_key(event)
+      # Extract the field references from the sprintf patterns
+      alias_fields = extract_field_references(@ilm_rollover_alias)
+      policy_fields = @ilm_policy ? extract_field_references(@ilm_policy) : []
+      
+      # Get raw values for all fields
+      alias_values = alias_fields.map { |field| event.get(field).to_s }
+      policy_values = policy_fields.map { |field| event.get(field).to_s }
+      
+      # Build cache key from raw values
+      # Format: "alias_pattern:field1_value:field2_value|policy_pattern:field1_value:field2_value"
+      "#{@ilm_rollover_alias}:#{alias_values.join(':')}|#{@ilm_policy}:#{policy_values.join(':')}"
+    end
+    
+    # Extract field references from a sprintf pattern
+    # Example: "%{[container_name]}" -> ["[container_name]"]
+    # Example: "%{[kubernetes][namespace]}-%{[container]}" -> ["[kubernetes][namespace]", "[container]"]
+    def extract_field_references(pattern)
+      return [] unless pattern
+      
+      # Match all %{...} patterns
+      pattern.scan(/%\{([^\}]+)\}/).flatten
+    end
+
+    def ilm_alias_set?
+      default_index?(@index) || !default_rollover_alias?(@ilm_rollover_alias)
+    end
+
+    def default_index?(index)
+      index == @default_index
+    end
+
+    def default_rollover_alias?(rollover_alias)
+      rollover_alias == default_ilm_rollover_alias
+    end
+
+    def ilm_policy_default?
+      ilm_policy == LogStash::Outputs::ElasticSearch::DEFAULT_POLICY
+    end
+
+    def maybe_create_ilm_policy
+      if ilm_policy_default?
+        client.ilm_policy_put(ilm_policy, policy_payload) unless client.ilm_policy_exists?(ilm_policy)
+      else
+        raise LogStash::ConfigurationError, "The specified ILM policy #{ilm_policy} does not exist on your Elasticsearch instance" unless client.ilm_policy_exists?(ilm_policy)
+      end
+    end
+
+    def maybe_create_rollover_alias
+            client.rollover_alias_put(rollover_alias_target, rollover_alias_payload) unless client.rollover_alias_exists?(ilm_rollover_alias)
+    end
+
+    def rollover_alias_target
+      "<#{ilm_rollover_alias}-#{ilm_pattern}>"
+    end
+
+    def rollover_alias_payload
+      {
+          'aliases' => {
+              ilm_rollover_alias =>{
+                  'is_write_index' =>  true
+              }
+          },          'settings' => {
+              'index.lifecycle.name' => ilm_policy,
+              'index.lifecycle.rollover_alias' => ilm_rollover_alias
+          }
+      }
+    end
+    
+    def policy_payload
+      @policy_payload_cache ||= load_policy_from_file
+    end
+
+    private
+
+    def load_policy_from_file
+      # Check for custom ILM policy path in environment variable
+      custom_policy_path = ENV['ILM_POLICY_PATH'] || ENV['LOGSTASH_ILM_POLICY_PATH']
+      
+      if custom_policy_path && !custom_policy_path.empty?
+        # Custom policy path provided via environment variable
+        if ::File.exist?(custom_policy_path)
+          begin
+            logger.info("Loading custom ILM policy from environment variable", 
+                       :path => custom_policy_path,
+                       :env_var => custom_policy_path == ENV['ILM_POLICY_PATH'] ? 'ILM_POLICY_PATH' : 'LOGSTASH_ILM_POLICY_PATH')
+            policy_content = ::IO.read(custom_policy_path)
+            policy = LogStash::Json.load(policy_content)
+            logger.info("Successfully loaded custom ILM policy", :path => custom_policy_path)
+            return policy
+          rescue => e
+            logger.error("Failed to load custom ILM policy from environment variable, falling back to default", 
+                        :path => custom_policy_path,
+                        :error => e.message,
+                        :backtrace => e.backtrace.first(3))
+            # Fall through to default policy
+          end
+        else
+          logger.error("Custom ILM policy path specified in environment variable does not exist, falling back to default", 
+                      :path => custom_policy_path,
+                      :env_var => custom_policy_path == ENV['ILM_POLICY_PATH'] ? 'ILM_POLICY_PATH' : 'LOGSTASH_ILM_POLICY_PATH')
+          # Fall through to default policy
+        end
+      end
+      
+      # Load default policy
+      default_policy_path = ::File.expand_path(ILM_POLICY_PATH, ::File.dirname(__FILE__))
+      begin
+        logger.info("Loading default ILM policy", :path => default_policy_path)
+        policy_content = ::IO.read(default_policy_path)
+        policy = LogStash::Json.load(policy_content)
+        logger.debug("Successfully loaded default ILM policy")
+        return policy
+      rescue => e
+        logger.error("Failed to load default ILM policy file", 
+                    :path => default_policy_path,
+                    :error => e.message)
+        raise LogStash::ConfigurationError, 
+              "Cannot load ILM policy: #{e.message}. " +
+              "Please ensure the default policy file exists at #{default_policy_path} " +
+              "or provide a valid custom policy path via ILM_POLICY_PATH or LOGSTASH_ILM_POLICY_PATH environment variable."
+      end
+    end
+
+    public    
+    
     # Create index template for dynamic alias with caching
     def create_dynamic_index_template(resolved_alias, policy_name)
       @dynamic_templates_created ||= Set.new
-        # Cache key for template
       template_name = "logstash-#{resolved_alias}"
       
-      # Fast path - already created
+      # OPTIMIZED: Fast path - check in-memory cache ONLY
+      # No API call if we've already created it in this session
       if @dynamic_templates_created.include?(template_name)
         logger.debug("Template already created in this session", :template => template_name)
         return
       end
       
-      # Check if template already exists in Elasticsearch
-      if template_exists?(template_name)
-        logger.info("Template already exists in Elasticsearch, skipping creation", :template => template_name)
-        @dynamic_templates_created.add(template_name)
-        return
-      end
-      
+      # Only make API call on cache miss
+      # Note: This means if template exists but wasn't created by this instance,
+      # we'll try to create it again and ES will return 400, which we handle gracefully
       logger.info("Creating dynamic index template",
                  :template => template_name,
                  :alias => resolved_alias,
@@ -328,14 +463,20 @@ module LogStash; module Outputs; class ElasticSearch
                     :template => template_name,
                     :index_patterns => template_payload['index_patterns'],
                     :policy => policy_name)
-        
-        # Create the template
+          # Create the template
         client.template_put(template_endpoint, template_name, template_payload)
         
-        # Cache it
+        # Cache it on success
         @dynamic_templates_created.add(template_name)
         logger.info("Successfully created dynamic index template", :template => template_name)
       rescue ::LogStash::Outputs::ElasticSearch::HttpClient::Pool::BadResponseCodeError => e
+        # Handle already exists error (400) - this is OK, just cache it
+        if e.response_code == 400 && e.message =~ /already exists/i
+          logger.info("Template already exists, caching it", :template => template_name)
+          @dynamic_templates_created.add(template_name)
+          return
+        end
+        
         # Extract detailed error from Elasticsearch response
         error_details = e.message
         begin
