@@ -10,6 +10,7 @@
 ```bash
 ruby -c lib/logstash/outputs/elasticsearch/ilm.rb
 ```
+
 **Result**: `Syntax OK`
 
 All Ruby syntax is valid and error-free.
@@ -21,15 +22,18 @@ All Ruby syntax is valid and error-free.
 ### Multi-Layer Cache Strategy
 
 #### **Layer 1: Fast Path (No Lock) - 99.99% of Events**
+
 ```ruby
 # Line 72 in ilm.rb
 return if @dynamic_ilm_aliases_created.include?(alias_key)
 ```
+
 - **Performance**: ~1 microsecond per event
 - **Overhead**: **0.0001%** CPU usage
 - **Result**: Immediate return for all events after first
 
 #### **Layer 2: Template Cache (No Lock)**
+
 ```ruby
 # Line 299-302 in ilm.rb
 if @dynamic_templates_created.include?(template_name)
@@ -37,16 +41,19 @@ if @dynamic_templates_created.include?(template_name)
   return
 end
 ```
+
 - **Performance**: ~1 microsecond per check
 - **Cached**: Templates that were created this session
 
 #### **Layer 3: Policy Payload Cache**
+
 ```ruby
 # Line 252-253 in ilm.rb
 def policy_payload
   @policy_payload_cache ||= load_policy_from_file
 end
 ```
+
 - **Performance**: File loaded ONCE per Logstash instance
 - **Result**: No repeated file I/O
 
@@ -55,11 +62,13 @@ end
 ## 3. ✅ Thread Safety
 
 ### Mutex Protection
+
 ```ruby
 @dynamic_ilm_aliases_lock ||= Mutex.new
 ```
 
 ### Double-Check Locking Pattern
+
 ```ruby
 # Fast check (no lock)
 return if @dynamic_ilm_aliases_created.include?(alias_key)
@@ -73,6 +82,7 @@ end
 ```
 
 **Benefits**:
+
 - ✅ Prevents race conditions
 - ✅ Prevents duplicate API calls
 - ✅ Lock only held during initial creation
@@ -83,6 +93,7 @@ end
 ## 4. ✅ Performance Metrics
 
 ### First Event (Per Unique Alias:Policy)
+
 ```
 Time: ~150ms (one-time setup)
 Operations:
@@ -94,6 +105,7 @@ Operations:
 ```
 
 ### All Subsequent Events (Same Alias:Policy)
+
 ```
 Time: ~0.001ms (1 microsecond)
 Operations:
@@ -102,11 +114,12 @@ Operations:
 ```
 
 ### Throughput Impact
+
 | Events/Second | Unique Aliases | Initial Setup Time | Steady State Overhead |
-|---------------|----------------|--------------------|-----------------------|
-| 1,000 | 10 | ~1.5 seconds | < 0.001% |
-| 10,000 | 20 | ~3.0 seconds | < 0.001% |
-| 100,000 | 50 | ~7.5 seconds | < 0.001% |
+| ------------- | -------------- | ------------------ | --------------------- |
+| 1,000         | 10             | ~1.5 seconds       | < 0.001%              |
+| 10,000        | 20             | ~3.0 seconds       | < 0.001%              |
+| 100,000       | 50             | ~7.5 seconds       | < 0.001%              |
 
 **After initial setup**: System can process **millions of events/second** with negligible overhead.
 
@@ -115,6 +128,7 @@ Operations:
 ## 5. ✅ Memory Efficiency
 
 ### Data Structures
+
 ```ruby
 @dynamic_ilm_aliases_created = Set.new      # O(n) where n = unique alias:policy pairs
 @dynamic_templates_created = Set.new        # O(m) where m = unique templates
@@ -122,12 +136,13 @@ Operations:
 ```
 
 ### Memory Usage
-| Component | Size per Entry | Example (20 aliases) |
-|-----------|---------------|----------------------|
-| Alias cache entries | ~100 bytes | ~2 KB |
-| Template cache entries | ~80 bytes | ~1.6 KB |
-| Policy payload | ~2 KB | ~2 KB |
-| **Total** | | **~6 KB** |
+
+| Component              | Size per Entry | Example (20 aliases) |
+| ---------------------- | -------------- | -------------------- |
+| Alias cache entries    | ~100 bytes     | ~2 KB                |
+| Template cache entries | ~80 bytes      | ~1.6 KB              |
+| Policy payload         | ~2 KB          | ~2 KB                |
+| **Total**              |                | **~6 KB**            |
 
 **Conclusion**: Negligible memory overhead even with hundreds of unique aliases.
 
@@ -136,12 +151,14 @@ Operations:
 ## 6. ✅ Network Call Optimization
 
 ### First Event for Each Unique Alias:Policy
+
 - ✅ Check policy exists (ES API)
 - ✅ Check template exists (ES API)
 - ✅ Check alias exists (ES API)
 - ✅ Create operations (only if not exists)
 
 ### All Subsequent Events
+
 - ❌ **NO** network calls
 - ❌ **NO** Elasticsearch queries
 - ❌ **NO** API requests
@@ -154,7 +171,9 @@ Operations:
 ## 7. ✅ Bug Fixes Applied
 
 ### Critical Bug Fixed: `template_exists?` Always Returned True
+
 **Before**:
+
 ```ruby
 def template_exists?(template_name)
   client.template_exists?(template_endpoint, template_name)
@@ -163,6 +182,7 @@ end
 ```
 
 **After**:
+
 ```ruby
 def template_exists?(template_name)
   client.template_exists?(template_endpoint, template_name)  # ✅ Returns actual result
@@ -176,6 +196,7 @@ end
 ## 8. ✅ Error Handling
 
 ### Graceful Failures
+
 ```ruby
 rescue => e
   logger.error("Failed to create dynamic index template",
@@ -188,6 +209,7 @@ end
 ```
 
 **Benefits**:
+
 - ✅ Doesn't block event processing
 - ✅ Comprehensive error logging
 - ✅ Graceful degradation
@@ -236,6 +258,7 @@ Check cache: @dynamic_ilm_aliases_created.include?(alias_key)
 ## 10. ✅ Production Deployment Checklist
 
 ### Pre-Deployment
+
 - ✅ Syntax check passed
 - ✅ Caching verified
 - ✅ Thread safety confirmed
@@ -244,6 +267,7 @@ Check cache: @dynamic_ilm_aliases_created.include?(alias_key)
 - ✅ Logging comprehensive
 
 ### Configuration Requirements
+
 ```ruby
 # In your Logstash configuration:
 output {
@@ -258,12 +282,15 @@ output {
 ```
 
 ### Environment Variables (Optional)
+
 ```bash
 export ILM_POLICY_PATH="/path/to/custom-ilm-policy.json"
 ```
 
 ### Monitoring
+
 Watch for these log messages:
+
 1. `"Attempting to create dynamic index template"` - Initial setup
 2. `"Template already exists in Elasticsearch, skipping creation"` - Cache hit
 3. `"Template already created in this session"` - In-memory cache hit
@@ -273,22 +300,25 @@ Watch for these log messages:
 ## 11. ✅ Expected Behavior in Production
 
 ### First Event for Each Unique Container/Alias
+
 ```
 [INFO] Attempting to create dynamic index template
-       {:alias=>"erma-connector-notifv2", 
+       {:alias=>"erma-connector-notifv2",
         :policy=>"erma-connector-notifv2-ilm-policy"}
 [INFO] Template already exists in Elasticsearch, skipping creation
        {:template=>"logstash-erma-connector-notifv2"}
 [INFO] Creating dynamic ILM rollover alias
-       {:alias=>"erma-connector-notifv2", 
+       {:alias=>"erma-connector-notifv2",
         :policy=>"erma-connector-notifv2-ilm-policy"}
 ```
 
 ### All Subsequent Events (Same Container)
+
 ```
 [DEBUG] Template already created in this session
         {:template=>"logstash-erma-connector-notifv2"}
 ```
+
 (No other logs - immediate return from cache)
 
 ---
@@ -296,6 +326,7 @@ Watch for these log messages:
 ## 12. ✅ Key Metrics to Monitor
 
 ### Success Indicators
+
 - ✅ Templates created with pattern: `logstash-{alias}`
 - ✅ Index pattern: `{alias}-*`
 - ✅ ILM policy attached to templates
@@ -303,6 +334,7 @@ Watch for these log messages:
 - ✅ No repeated "Creating" messages for same alias
 
 ### Performance Indicators
+
 - ✅ CPU usage < 0.1% for ILM operations (after initial setup)
 - ✅ Memory usage ~6 KB for 20 unique aliases
 - ✅ No additional network calls after first event per alias
@@ -315,6 +347,7 @@ Watch for these log messages:
 ### ✅ **PRODUCTION READY**
 
 Your dynamic ILM implementation is:
+
 1. ✅ **Syntactically correct** - No errors
 2. ✅ **Performance optimized** - < 0.001% overhead after setup
 3. ✅ **Thread safe** - Mutex + double-check locking

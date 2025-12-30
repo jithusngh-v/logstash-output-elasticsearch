@@ -104,6 +104,7 @@
 ## 📊 Performance Comparison
 
 ### Event 1 (First time seeing this alias:policy)
+
 ```
 ┌─────────────────────┬──────────────────────────────────────┐
 │ Stage               │ Time                                 │
@@ -122,6 +123,7 @@
 ```
 
 ### Events 2-1,000,000 (Same alias:policy)
+
 ```
 ┌─────────────────────┬──────────────────────────────────────┐
 │ Stage               │ Time                                 │
@@ -153,7 +155,7 @@ Event arrives           Event arrives           Event arrives
 ├─ RELEASE LOCK 🔓      │                       │
 │                       ├─ GOT LOCK! 🔒         ├─ Check cache ✓
 │                       ├─ Double-check ✓       └─ RETURN ⚡
-│                       └─ RETURN ⚡            
+│                       └─ RETURN ⚡
 │                           (Already created!)
 └─ Continue...
 ```

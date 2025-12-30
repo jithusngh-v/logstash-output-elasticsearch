@@ -304,6 +304,44 @@ module LogStash; module Outputs; class ElasticSearch
 
     private
 
+    def load_template_from_file_or_env
+      return @template_payload_cache if defined?(@template_payload_cache)
+      
+      @template_payload_cache = begin
+        # Check for custom template path in environment variable
+        custom_template_path = ENV['ILM_TEMPLATE_PATH'] || ENV['LOGSTASH_ILM_TEMPLATE_PATH']
+        
+        if custom_template_path && !custom_template_path.empty?
+          # Custom template path provided via environment variable
+          if ::File.exist?(custom_template_path)
+            begin
+              logger.info("Loading custom ILM template from environment variable", 
+                         :path => custom_template_path,
+                         :env_var => custom_template_path == ENV['ILM_TEMPLATE_PATH'] ? 'ILM_TEMPLATE_PATH' : 'LOGSTASH_ILM_TEMPLATE_PATH')
+              template_content = ::IO.read(custom_template_path)
+              template = LogStash::Json.load(template_content)
+              logger.info("Successfully loaded custom ILM template", :path => custom_template_path)
+              return template
+            rescue => e
+              logger.error("Failed to load custom ILM template from environment variable, using built-in defaults", 
+                          :path => custom_template_path,
+                          :error => e.message,
+                          :backtrace => e.backtrace.first(3))
+              # Fall through to return nil (use defaults)
+            end
+          else
+            logger.error("Custom ILM template path specified in environment variable does not exist, using built-in defaults", 
+                        :path => custom_template_path,
+                        :env_var => custom_template_path == ENV['ILM_TEMPLATE_PATH'] ? 'ILM_TEMPLATE_PATH' : 'LOGSTASH_ILM_TEMPLATE_PATH')
+            # Fall through to return nil (use defaults)
+          end
+        end
+        
+        # Return nil to use built-in defaults
+        nil
+      end
+    end
+
     # Build a fast cache key from raw field values (before sprintf)
     # This allows cache lookup without expensive string interpolation
     def build_raw_cache_key(event)
@@ -377,57 +415,6 @@ module LogStash; module Outputs; class ElasticSearch
     
     def policy_payload
       @policy_payload_cache ||= load_policy_from_file
-    end
-
-    private
-
-    def load_policy_from_file
-      # Check for custom ILM policy path in environment variable
-      custom_policy_path = ENV['ILM_POLICY_PATH'] || ENV['LOGSTASH_ILM_POLICY_PATH']
-      
-      if custom_policy_path && !custom_policy_path.empty?
-        # Custom policy path provided via environment variable
-        if ::File.exist?(custom_policy_path)
-          begin
-            logger.info("Loading custom ILM policy from environment variable", 
-                       :path => custom_policy_path,
-                       :env_var => custom_policy_path == ENV['ILM_POLICY_PATH'] ? 'ILM_POLICY_PATH' : 'LOGSTASH_ILM_POLICY_PATH')
-            policy_content = ::IO.read(custom_policy_path)
-            policy = LogStash::Json.load(policy_content)
-            logger.info("Successfully loaded custom ILM policy", :path => custom_policy_path)
-            return policy
-          rescue => e
-            logger.error("Failed to load custom ILM policy from environment variable, falling back to default", 
-                        :path => custom_policy_path,
-                        :error => e.message,
-                        :backtrace => e.backtrace.first(3))
-            # Fall through to default policy
-          end
-        else
-          logger.error("Custom ILM policy path specified in environment variable does not exist, falling back to default", 
-                      :path => custom_policy_path,
-                      :env_var => custom_policy_path == ENV['ILM_POLICY_PATH'] ? 'ILM_POLICY_PATH' : 'LOGSTASH_ILM_POLICY_PATH')
-          # Fall through to default policy
-        end
-      end
-      
-      # Load default policy
-      default_policy_path = ::File.expand_path(ILM_POLICY_PATH, ::File.dirname(__FILE__))
-      begin
-        logger.info("Loading default ILM policy", :path => default_policy_path)
-        policy_content = ::IO.read(default_policy_path)
-        policy = LogStash::Json.load(policy_content)
-        logger.debug("Successfully loaded default ILM policy")
-        return policy
-      rescue => e
-        logger.error("Failed to load default ILM policy file", 
-                    :path => default_policy_path,
-                    :error => e.message)
-        raise LogStash::ConfigurationError, 
-              "Cannot load ILM policy: #{e.message}. " +
-              "Please ensure the default policy file exists at #{default_policy_path} " +
-              "or provide a valid custom policy path via ILM_POLICY_PATH or LOGSTASH_ILM_POLICY_PATH environment variable."
-      end
     end
 
     public    
@@ -507,80 +494,102 @@ module LogStash; module Outputs; class ElasticSearch
         # Don't fail the event if template creation fails
         # The index will still be created, just without the template
       end
-    end
-
-    # Build index template payload matching your Python script requirements
+    end    # Build index template payload matching your Python script requirements
     def build_template_payload(resolved_alias, policy_name)
-      # Default settings matching your requirements
-      default_settings = {
-        'index' => {
-          'lifecycle' => {
-            'name' => policy_name,
-            'rollover_alias' => resolved_alias
-          },
-          'routing' => {
-            'allocation' => {
-              'include' => {
-                '_tier_preference' => 'data_content'
-              }
-            }
-          },
-          'refresh_interval' => '5s',
-          'number_of_shards' => 1,
-          'number_of_replicas' => 0
-        }
-      }
+      # Load base template from environment variable or use defaults
+      base_template = load_template_from_file_or_env
       
-      # Deep merge with custom settings if provided
+      # Extract settings from loaded template or use defaults
+      default_settings = if base_template && base_template['template'] && base_template['template']['settings']
+                          base_template['template']['settings']
+                        else
+                          {
+                            'index' => {
+                              'lifecycle' => {
+                                'name' => policy_name,
+                                'rollover_alias' => resolved_alias
+                              },
+                              'routing' => {
+                                'allocation' => {
+                                  'include' => {
+                                    '_tier_preference' => 'data_content'
+                                  }
+                                }
+                              },
+                              'refresh_interval' => '5s',
+                              'number_of_shards' => 1,
+                              'number_of_replicas' => 0
+                            }
+                          }
+                        end
+      
+      # Override ILM settings with current alias and policy
+      default_settings['index'] ||= {}
+      default_settings['index']['lifecycle'] = {
+        'name' => policy_name,
+        'rollover_alias' => resolved_alias
+      }
+        # Deep merge with custom settings if provided
       merged_settings = deep_merge(default_settings, @ilm_template_settings || {})
       
-      # Default mappings matching your requirements
-      default_mappings = {
-        'dynamic_templates' => [
-          {
-            'message_field' => {
-              'path_match' => 'message',
-              'match_mapping_type' => 'string',
-              'mapping' => {
-                'type' => 'text',
-                'norms' => false
-              }
-            }
-          },
-          {
-            'string_fields' => {
-              'match' => '*',
-              'match_mapping_type' => 'string',
-              'mapping' => {
-                'type' => 'text',
-                'norms' => false,
-                'fields' => {
-                  'keyword' => {
-                    'type' => 'keyword',
-                    'ignore_above' => 256
-                  }
-                }
-              }
-            }
-          }
-        ],
-        'properties' => {
-          '@timestamp' => { 'type' => 'date' },
-          '@version' => { 'type' => 'keyword' },
-          'geoip' => {
-            'dynamic' => true,
-            'properties' => {
-              'ip' => { 'type' => 'ip' },
-              'latitude' => { 'type' => 'half_float' },
-              'longitude' => { 'type' => 'half_float' },
-              'location' => { 'type' => 'geo_point' }
-            }
-          }
-        }
-      }
+      # Extract mappings from loaded template or use defaults
+      default_mappings = if base_template && base_template['template'] && base_template['template']['mappings']
+                          base_template['template']['mappings']
+                        else
+                          {
+                            'dynamic_templates' => [
+                              {
+                                'message_field' => {
+                                  'path_match' => 'message',
+                                  'match_mapping_type' => 'string',
+                                  'mapping' => {
+                                    'type' => 'text',
+                                    'norms' => false
+                                  }
+                                }
+                              },
+                              {
+                                'string_fields' => {
+                                  'match' => '*',
+                                  'match_mapping_type' => 'string',
+                                  'mapping' => {
+                                    'type' => 'text',
+                                    'norms' => false,
+                                    'fields' => {
+                                      'keyword' => {
+                                        'type' => 'keyword',
+                                        'ignore_above' => 256
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            ],
+                            'properties' => {
+                              '@timestamp' => { 'type' => 'date' },
+                              '@version' => { 'type' => 'keyword' },
+                              'geoip' => {
+                                'dynamic' => true,
+                                'properties' => {
+                                  'ip' => { 'type' => 'ip' },
+                                  'latitude' => { 'type' => 'half_float' },
+                                  'longitude' => { 'type' => 'half_float' },
+                                  'location' => { 'type' => 'geo_point' }
+                                }
+                              }
+                            }
+                          }
+                        end
       
       # Deep merge with custom mappings if provided
       merged_mappings = deep_merge(default_mappings, @ilm_template_mappings || {})
+      
+      # Extract priority from loaded template or use default
+      priority = if base_template && base_template['priority']
+                   base_template['priority']
+                 else
+                   300
+                 end
       
       # Return complete template payload
       {
@@ -590,14 +599,14 @@ module LogStash; module Outputs; class ElasticSearch
           'mappings' => merged_mappings,
           'aliases' => {}
         },
-        'priority' => 300,
+        'priority' => priority,
         '_meta' => {
           'description' => 'Dynamically created template for ILM-managed index',
           'created_by' => 'logstash-output-elasticsearch',
           'created_at' => Time.now.utc.iso8601
         }
       }
-    end    
+    end
     # Check if template exists
     def template_exists?(template_name)
       begin
